@@ -1,0 +1,39 @@
+
+.ksh-dashboard-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 11px;
+  min-height: 43px;
+  padding: 0 17px;
+  flex-shrink: 0;
+  background: #202124;
+  border: 1px solid #3E3F45;
+  border-radius: 10px;
+  color: #FFFFFF;
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background 0.2s ease, border-color 0.2s ease;
+}
+.ksh-dashboard-button:hover {
+  background: #27282C;
+  border-color: #F59E0B;
+}
+.ksh-dashboard-button:focus-visible {
+  outline: 2px solid #F59E0B;
+  outline-offset: 3px;
+}
+.ksh-dashboard-button svg {
+  flex-shrink: 0;
+}
+@media (max-width: 480px) {
+  .ksh-dashboard-button {
+    min-height: 39px;
+    padding: 0 13px;
+    gap: 8px;
+    font-size: 12px;
+  }
+}

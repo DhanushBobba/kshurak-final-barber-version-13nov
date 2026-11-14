@@ -1,0 +1,95 @@
+
+.ksh-splash {
+  position: fixed;
+  inset: 0;
+  z-index: 2147483647;
+  width: 100%;
+  height: 100vh;
+  height: 100dvh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  background: #000000;
+  opacity: 1;
+  transition: opacity 300ms ease;
+}
+.ksh-splash-exit {
+  opacity: 0;
+  pointer-events: none;
+}
+.ksh-splash-video {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  object-position: center;
+  background: #000000;
+  opacity: 0;
+}
+.ksh-splash-video-ready {
+  opacity: 1;
+}
+.ksh-splash-loading {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.ksh-splash-spinner {
+  width: 34px;
+  height: 34px;
+  border: 3px solid #2d2d2d;
+  border-top-color: #f59e0b;
+  border-radius: 50%;
+  animation: ksh-spin 850ms linear infinite;
+}
+.ksh-splash-error {
+  position: relative;
+  z-index: 3;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 15px;
+  max-width: 460px;
+  padding: 25px;
+  color: #ffffff;
+  text-align: center;
+}
+.ksh-splash-error h2 {
+  color: #f59e0b;
+  font-size: 32px;
+  font-weight: 900;
+  letter-spacing: 3px;
+  margin: 0;
+}
+.ksh-splash-error p {
+  color: #a1a1aa;
+  font-size: 13px;
+  line-height: 1.7;
+}
+.ksh-splash-error button {
+  padding: 11px 18px;
+  border: 0;
+  border-radius: 9px;
+  background: #f59e0b;
+  color: #000;
+  font-weight: 800;
+  cursor: pointer;
+}
+@keyframes ksh-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ksh-splash {
+    transition: none;
+  }
+  .ksh-splash-spinner {
+    animation: none;
+  }
+}

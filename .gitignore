@@ -1,0 +1,36 @@
+
+# Python
+**/.venv/
+**/venv/
+**/__pycache__/
+*.pyc
+
+# Node.js
+**/node_modules/
+**/dist/
+**/.next/
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+**/.env
+**/.env.*
+!**/.env.example
+
+# Build outputs
+**/.gradle/
+**/build/
+**/.expo/
+*.apk
+*.aab
+
+# Archives and generated exports
+*.zip
+**/repomix-output*.xml
+
+# Editor and OS
+.vscode/
+.DS_Store
+Thumbs.db
+
