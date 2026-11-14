@@ -1,25 +1,38 @@
+
 {
   "expo": {
-    "name": "mobile-barber",
+    "name": "KSHURAK Barber",
     "slug": "mobile-barber",
     "version": "1.0.0",
+    "scheme": "kshurakbarber",
     "orientation": "portrait",
-    "icon": "./assets/icon.png",
+    "icon": "./assets/images/app-icon.png",
     "userInterfaceStyle": "light",
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "icon": "./assets/images/app-icon.png"
     },
     "android": {
+      "icon": "./assets/images/app-icon.png",
       "adaptiveIcon": {
-        "backgroundColor": "#E6F4FE",
-        "foregroundImage": "./assets/android-icon-foreground.png",
-        "backgroundImage": "./assets/android-icon-background.png",
-        "monochromeImage": "./assets/android-icon-monochrome.png"
+        "foregroundImage": "./assets/images/android-icon-foreground.png",
+        "backgroundColor": "#070708"
       },
-      "predictiveBackGestureEnabled": false
+      "predictiveBackGestureEnabled": false,
+      "package": "com.intelerateam.mobilebarber"
     },
     "web": {
-      "favicon": "./assets/favicon.png"
+      "favicon": "./assets/images/app-icon.png"
+    },
+    "plugins": [
+      "expo-secure-store",
+      "expo-video",
+      "expo-status-bar"
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "895c5927-7389-4325-8e6e-d535c8bedb80"
+      }
     }
   }
 }

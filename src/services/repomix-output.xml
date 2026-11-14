@@ -1,0 +1,4044 @@
+This file is a merged representation of the entire codebase, combined into a single document by Repomix.
+
+<file_summary>
+This section contains a summary of this file.
+
+<purpose>
+This file contains a packed representation of the entire repository's contents.
+It is designed to be easily consumable by AI systems for analysis, code review,
+or other automated processes.
+</purpose>
+
+<file_format>
+The content is organized as follows:
+1. This summary section
+2. Repository information
+3. Directory structure
+4. Repository files (if enabled)
+5. Multiple file entries, each consisting of:
+  - File path as an attribute
+  - Full contents of the file
+</file_format>
+
+<usage_guidelines>
+- This file should be treated as read-only. Any changes should be made to the
+  original repository files, not this packed version.
+- When processing this file, use the file path to distinguish
+  between different files in the repository.
+- Be aware that this file may contain sensitive information. Handle it with
+  the same level of security as you would the original repository.
+</usage_guidelines>
+
+<notes>
+- Some files may have been excluded based on .gitignore rules and Repomix's configuration
+- Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
+- Files matching patterns in .gitignore are excluded
+- Files matching default ignore patterns are excluded
+- Files are sorted by Git change count (files with more changes are at the bottom)
+</notes>
+
+</file_summary>
+
+<directory_structure>
+barberApi.ts
+barberDashboard.ts
+barberRegistrationApi.ts
+bookingApi.ts
+customersApi.ts
+notificationsApi.ts
+registrationCorrectionApi.ts
+reschedulingApi.ts
+reviewsApi.ts
+servicesApi.ts
+shopSetupApi.ts
+</directory_structure>
+
+<files>
+This section contains the contents of the repository's files.
+
+<file path="barberApi.ts">
+export interface BarberRegistrationPayload {
+    username: string;
+    email: string;
+    password: string;
+    shop_address: string;
+    years_experience: number;
+}
+export interface BarberRegistrationResponse {
+    id: string;
+    status: "pending";
+    message: string;
+}
+type ApiErrorDetail = string | { msg?: string; message?: string }[] | { message?: string } | undefined;
+const API_BASE_URL = (process.env.EXPO_PUBLIC_API_BASE_URL || "").trim().replace(/\/+$/, "");
+function getApiBaseUrl(): string {
+    if (!API_BASE_URL) {
+        throw new Error("API URL is not configured. Set EXPO_PUBLIC_API_BASE_URL in the mobile-barber .env file.");
+    }
+    if (!/^https?:\/\/[^/]+/i.test(API_BASE_URL)) {
+        throw new Error("Invalid backend URL. Use http:// or https://.");
+    }
+    return API_BASE_URL;
+}
+function getErrorMessage(detail: ApiErrorDetail): string {
+    if (typeof detail === "string" && detail.trim()) {
+        return detail;
+    }
+    if (Array.isArray(detail)) {
+        return detail.map((item) => item.msg || item.message || "Invalid field").join(", ");
+    }
+    if (detail && typeof detail === "object" && typeof detail.message === "string") {
+        return detail.message;
+    }
+    return "Registration failed. Please try again.";
+}
+export async function registerBarber(payload: BarberRegistrationPayload): Promise<BarberRegistrationResponse> {
+    const baseUrl = getApiBaseUrl();
+    let response: Response;
+    try {
+        response = await fetch(`${baseUrl}/api/v1/barber/register`, {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+                Accept: "application/json",
+            },
+            body: JSON.stringify({
+                username: payload.username.trim(),
+                email: payload.email.trim().toLowerCase(),
+                password: payload.password,
+                shop_address: payload.shop_address.trim(),
+                years_experience: payload.years_experience,
+            }),
+        });
+    } catch {
+        throw new Error("Cannot connect to KSHURAK backend. Check your server and network connection.");
+    }
+    const data: any = await response.json().catch(() => null);
+    if (!response.ok) {
+        if (response.status === 409) {
+            throw new Error(getErrorMessage(data?.detail) || "Username or email already registered.");
+        }
+        if (response.status === 503) {
+            throw new Error("KSHURAK registration service is temporarily unavailable.");
+        }
+        throw new Error(getErrorMessage(data?.detail));
+    }
+    if (!data || typeof data.id !== "string" || typeof data.status !== "string") {
+        throw new Error("Invalid registration response from KSHURAK server.");
+    }
+    return data as BarberRegistrationResponse;
+}
+</file>
+
+<file path="barberDashboard.ts">
+import * as SecureStore from "expo-secure-store";
+const API_BASE_URL = (process.env.EXPO_PUBLIC_API_BASE_URL || "").trim().replace(/\/+$/, "");
+const TOKEN_KEY = "kshurak_barber_token";
+export type DashboardStats = {
+  todays_bookings?: number | null;
+  todays_revenue?: number | null;
+  total_customers?: number | null;
+  average_rating?: number | null;
+};
+export type DashboardSetup = {
+  shop_profile?: boolean;
+  shop_details?: boolean;
+  workers?: boolean;
+  documents?: boolean;
+  capacity?: boolean;
+  available_slots?: boolean;
+};
+export type DashboardAppointment = {
+  id: string;
+  customer_name: string;
+  service_name: string;
+  start_time: string;
+  status?: string;
+};
+export type BarberDashboardData = {
+  username?: string;
+  stats?: DashboardStats;
+  setup?: DashboardSetup;
+  today_schedule?: DashboardAppointment[];
+  weekly_bookings?: number[];
+};
+export class DashboardApiError extends Error {
+  status: number;
+  constructor(message: string, status = 0) {
+    super(message);
+    this.name = "DashboardApiError";
+    this.status = status;
+  }
+}
+function optionalNumber(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim() !== "" && Number.isFinite(Number(value))) return Number(value);
+  return undefined;
+}
+function optionalBoolean(value: unknown): boolean | undefined {
+  if (typeof value === "boolean") return value;
+  if (value === "true" || value === "TRUE" || value === 1) return true;
+  if (value === "false" || value === "FALSE" || value === 0) return false;
+  return undefined;
+}
+function readObject(value: unknown): Record<string, any> {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, any> : {};
+}
+function normalizeDashboard(response: unknown): BarberDashboardData {
+  const root = readObject(response);
+  const source = readObject(root.data);
+  const raw = Object.keys(source).length ? source : root;
+  const barber = readObject(raw.barber);
+  const stats = readObject(raw.stats || raw.statistics);
+  const setup = readObject(raw.setup || raw.shop_setup);
+  const appointments = raw.today_schedule ?? raw.todays_schedule ?? raw.today_appointments;
+  const weekly = raw.weekly_bookings ?? raw.booking_overview;
+  const normalizedStats: DashboardStats = {
+    todays_bookings: optionalNumber(stats.todays_bookings ?? stats.today_bookings ?? raw.todays_bookings),
+    todays_revenue: optionalNumber(stats.todays_revenue ?? stats.today_revenue ?? raw.todays_revenue),
+    total_customers: optionalNumber(stats.total_customers ?? raw.total_customers),
+    average_rating: optionalNumber(stats.average_rating ?? raw.average_rating),
+  };
+  const normalizedSetup: DashboardSetup = {
+    shop_profile: optionalBoolean(setup.shop_profile),
+    shop_details: optionalBoolean(setup.shop_details),
+    workers: optionalBoolean(setup.workers),
+    documents: optionalBoolean(setup.documents),
+    capacity: optionalBoolean(setup.capacity),
+    available_slots: optionalBoolean(setup.available_slots),
+  };
+  const normalizedAppointments = Array.isArray(appointments) ? appointments.map((item: any, index: number) => ({
+    id: String(item?.id ?? index),
+    customer_name: String(item?.customer_name ?? item?.customer ?? "Customer"),
+    service_name: String(item?.service_name ?? item?.service ?? "Service"),
+    start_time: String(item?.start_time ?? item?.time ?? ""),
+    status: typeof item?.status === "string" ? item.status : undefined,
+  })) : undefined;
+  const normalizedWeekly = Array.isArray(weekly) ? weekly.map(optionalNumber).filter((value): value is number => value !== undefined) : undefined;
+  return {
+    username: typeof raw.username === "string" ? raw.username : typeof barber.username === "string" ? barber.username : undefined,
+    stats: Object.values(normalizedStats).some((value) => value !== undefined) ? normalizedStats : undefined,
+    setup: Object.values(normalizedSetup).some((value) => value !== undefined) ? normalizedSetup : undefined,
+    today_schedule: normalizedAppointments,
+    weekly_bookings: normalizedWeekly,
+  };
+}
+export async function fetchBarberDashboard(): Promise<BarberDashboardData> {
+  if (!API_BASE_URL) throw new DashboardApiError("EXPO_PUBLIC_API_BASE_URL is missing.");
+  const token = await SecureStore.getItemAsync(TOKEN_KEY);
+  if (!token) throw new DashboardApiError("Please log in again.", 401);
+  let response: Response;
+  try {
+    response = await fetch(`${API_BASE_URL}/api/v1/barber/dashboard`, {
+      method: "GET",
+      headers: { Accept: "application/json", Authorization: `Bearer ${token}` },
+    });
+  } catch {
+    throw new DashboardApiError("Cannot connect to KSHURAK backend. Check your network connection.");
+  }
+  const data = await response.json().catch(() => null);
+  if (!response.ok) {
+    const detail = data?.detail;
+    const message = typeof detail === "string" ? detail : typeof detail?.message === "string" ? detail.message : response.status === 401 ? "Your session has expired. Please log in again." : `Dashboard request failed (${response.status}).`;
+    throw new DashboardApiError(message, response.status);
+  }
+  if (!data || typeof data !== "object" || Array.isArray(data)) throw new DashboardApiError("Invalid dashboard response received.");
+  return normalizeDashboard(data);
+}
+</file>
+
+<file path="barberRegistrationApi.ts">
+const API_BASE_URL = String(
+  process.env.EXPO_PUBLIC_API_BASE_URL || ""
+)
+  .trim()
+  .replace(/\/+$/, "");
+
+export type RegistrationFile = {
+  uri: string;
+  name: string;
+  mimeType: string;
+  size: number;
+};
+
+export interface BarberRegistrationPayload {
+  username: string;
+  email: string;
+  password: string;
+  years_experience: number;
+  shop_name: string;
+  shop_phone: string;
+  shop_address: string;
+  shop_image: RegistrationFile;
+  shop_documents: RegistrationFile[];
+}
+
+export interface BarberRegistrationResponse {
+  id: string;
+  status: "pending";
+  message: string;
+}
+
+function requireBaseUrl(): string {
+  if (!/^https?:\/\/[^/]+/i.test(API_BASE_URL)) {
+    throw new Error(
+      "EXPO_PUBLIC_API_BASE_URL is missing or invalid. " +
+      "Check your Mobile Barber .env file."
+    );
+  }
+
+  return API_BASE_URL;
+}
+
+function getErrorMessage(data: unknown): string {
+  const fallback =
+    "Registration failed. Please try again.";
+
+  if (!data || typeof data !== "object") {
+    return fallback;
+  }
+
+  const detail =
+    (data as { detail?: unknown }).detail;
+
+  if (typeof detail === "string") {
+    return detail;
+  }
+
+  if (
+    detail &&
+    typeof detail === "object" &&
+    !Array.isArray(detail)
+  ) {
+    const message =
+      (detail as { message?: unknown }).message;
+
+    if (typeof message === "string") {
+      return message;
+    }
+  }
+
+  if (Array.isArray(detail)) {
+    return detail
+      .map((item: unknown) => {
+        if (typeof item === "string") {
+          return item;
+        }
+
+        if (
+          item &&
+          typeof item === "object" &&
+          "msg" in item
+        ) {
+          return String(
+            (item as { msg: unknown }).msg
+          );
+        }
+
+        return "Invalid field";
+      })
+      .join(", ");
+  }
+
+  return fallback;
+}
+
+function appendFile(
+  formData: FormData,
+  fieldName: string,
+  file: RegistrationFile
+): void {
+  // React Native FormData supports local file objects.
+  // The cast is required because DOM TypeScript definitions
+  // don't describe React Native's {uri, name, type} format.
+  formData.append(
+    fieldName,
+    {
+      uri: file.uri,
+      name: file.name,
+      type: file.mimeType,
+    } as unknown as Blob
+  );
+}
+
+export async function registerBarber(
+  payload: BarberRegistrationPayload
+): Promise<BarberRegistrationResponse> {
+  const baseUrl = requireBaseUrl();
+
+  const formData = new FormData();
+
+  formData.append(
+    "username",
+    payload.username.trim()
+  );
+
+  formData.append(
+    "email",
+    payload.email.trim().toLowerCase()
+  );
+
+  formData.append(
+    "password",
+    payload.password
+  );
+
+  formData.append(
+    "years_experience",
+    String(payload.years_experience)
+  );
+
+  formData.append(
+    "shop_name",
+    payload.shop_name.trim()
+  );
+
+  formData.append(
+    "shop_phone",
+    payload.shop_phone.trim()
+  );
+
+  formData.append(
+    "shop_address",
+    payload.shop_address.trim()
+  );
+
+  appendFile(
+    formData,
+    "shop_image",
+    payload.shop_image
+  );
+
+  for (const document of payload.shop_documents) {
+    appendFile(
+      formData,
+      "shop_documents",
+      document
+    );
+  }
+
+  let response: Response;
+
+  try {
+    response = await fetch(
+      `${baseUrl}/api/v1/barber/register`,
+      {
+        method: "POST",
+        headers: {
+          Accept: "application/json",
+        },
+        body: formData,
+      }
+    );
+  } catch {
+    throw new Error(
+      "Unable to connect to KSHURAK FastAPI. " +
+      "Check the backend URL and network connection."
+    );
+  }
+
+  const data: unknown =
+    await response.json().catch(() => null);
+
+  if (!response.ok) {
+    throw new Error(getErrorMessage(data));
+  }
+
+  if (
+    !data ||
+    typeof data !== "object" ||
+    typeof (data as { id?: unknown }).id !== "string" ||
+    (data as { status?: unknown }).status !== "pending" ||
+    typeof (data as { message?: unknown }).message !== "string"
+  ) {
+    throw new Error(
+      "Unexpected registration response from the backend."
+    );
+  }
+
+  return data as BarberRegistrationResponse;
+}
+</file>
+
+<file path="bookingApi.ts">
+import * as SecureStore from "expo-secure-store";
+
+const API_BASE_URL = String(
+  process.env.EXPO_PUBLIC_API_BASE_URL || ""
+)
+  .trim()
+  .replace(/\/+$/, "");
+
+const BOOKINGS_PATH = "/api/v1/barber/bookings";
+const TOKEN_KEY = "kshurak_barber_token";
+
+const configuredTimeout = Number(
+  process.env.EXPO_PUBLIC_BOOKING_REQUEST_TIMEOUT_MS || 30000
+);
+
+const REQUEST_TIMEOUT_MS =
+  Number.isFinite(configuredTimeout) && configuredTimeout > 0
+    ? configuredTimeout
+    : 30000;
+
+export type BookingStatus =
+  | "pending"
+  | "confirmed"
+  | "completed"
+  | "cancelled"
+  | "rejected";
+
+export type BookingFilterStatus = BookingStatus | "all";
+
+export type HairstylePreviewAngle = "front" | "left" | "right";
+
+export interface BookingHairstylePreview {
+  angle: HairstylePreviewAngle;
+  image: string;
+}
+
+export interface BookingHairstyleSelection {
+  version: 1;
+  source: "virtual_tryon";
+  scan_id: string;
+  hairstyle_id: string;
+  hairstyle_name: string;
+  reference_image: string;
+  style_analysis: string;
+  face_shape: string | null;
+  previews: BookingHairstylePreview[];
+}
+
+export interface BarberBooking {
+  id: string;
+  barber_id: string;
+  worker_id: string | null;
+  customer_id: string | null;
+  customer_name: string;
+  customer_phone: string | null;
+  customer_image_url: string | null;
+  service_name: string;
+  service_duration_minutes: number;
+  service_price: string | number;
+  booking_date: string;
+  start_time: string;
+  end_time: string;
+  status: BookingStatus;
+  customer_notes: string | null;
+  cancellation_reason: string | null;
+  cancelled_by: string | null;
+  confirmed_at: string | null;
+  completed_at: string | null;
+  cancelled_at: string | null;
+  created_at: string;
+  updated_at: string;
+
+  hairstyle_selection?: BookingHairstyleSelection | null;
+  has_hairstyle_selection?: boolean;
+  hairstyle_name?: string | null;
+  hairstyle_details_loaded?: boolean;
+}
+
+export interface BookingCounts {
+  pending: number;
+  confirmed: number;
+  completed: number;
+  cancelled: number;
+  rejected: number;
+}
+
+export interface BookingListResponse {
+  bookings: BarberBooking[];
+  total: number;
+  counts: BookingCounts;
+}
+
+export interface BookingActionResponse {
+  message: string;
+  booking: BarberBooking;
+}
+
+export interface BookingFilters {
+  status?: BookingFilterStatus;
+  dateFrom?: string;
+  dateTo?: string;
+}
+
+export class BookingApiError extends Error {
+  readonly status: number;
+  readonly outcomeUnknown: boolean;
+
+  constructor(
+    message: string,
+    status = 0,
+    outcomeUnknown = false
+  ) {
+    super(message);
+    this.name = "BookingApiError";
+    this.status = status;
+    this.outcomeUnknown = outcomeUnknown;
+  }
+}
+
+function validateBaseUrl(): void {
+  try {
+    const url = new URL(API_BASE_URL);
+
+    if (
+      !["http:", "https:"].includes(url.protocol) ||
+      !url.hostname ||
+      url.username ||
+      url.password ||
+      url.search ||
+      url.hash
+    ) {
+      throw new Error("Invalid backend URL.");
+    }
+  } catch {
+    throw new BookingApiError(
+      "Configure a valid EXPO_PUBLIC_API_BASE_URL in your mobile .env file."
+    );
+  }
+}
+
+async function getAccessToken(): Promise<string> {
+  let token: string | null;
+
+  try {
+    token = await SecureStore.getItemAsync(TOKEN_KEY);
+  } catch {
+    throw new BookingApiError(
+      "Unable to read the secure login session."
+    );
+  }
+
+  if (!token?.trim()) {
+    throw new BookingApiError(
+      "Your session has expired. Please log in again.",
+      401
+    );
+  }
+
+  return token.trim();
+}
+
+function readError(body: unknown, fallback: string): string {
+  if (!body || typeof body !== "object" || !("detail" in body)) {
+    return fallback;
+  }
+
+  const detail = (body as { detail: unknown }).detail;
+
+  if (typeof detail === "string" && detail.trim()) {
+    return detail;
+  }
+
+  if (Array.isArray(detail)) {
+    const messages = detail
+      .map((item: unknown) => {
+        if (item && typeof item === "object" && "msg" in item) {
+          return String(item.msg);
+        }
+
+        return typeof item === "string" ? item : "";
+      })
+      .filter(Boolean);
+
+    return messages.length ? messages.join(", ") : fallback;
+  }
+
+  if (
+    detail &&
+    typeof detail === "object" &&
+    "message" in detail &&
+    typeof detail.message === "string"
+  ) {
+    return detail.message;
+  }
+
+  return fallback;
+}
+
+function bookingPath(bookingId: string): string {
+  const id = bookingId.trim();
+
+  if (!id) {
+    throw new BookingApiError("Booking identification is missing.");
+  }
+
+  return `/${encodeURIComponent(id)}`;
+}
+
+async function bookingRequest<T>(
+  path: string,
+  method: "GET" | "POST" = "GET",
+  payload?: unknown,
+  signal?: AbortSignal
+): Promise<T> {
+  validateBaseUrl();
+
+  const token = await getAccessToken();
+  const controller = new AbortController();
+  const isMutation = method === "POST";
+
+  let timedOut = false;
+
+  const abortFromCaller = () => controller.abort();
+
+  if (signal?.aborted) {
+    controller.abort();
+  } else {
+    signal?.addEventListener("abort", abortFromCaller, {
+      once: true,
+    });
+  }
+
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, REQUEST_TIMEOUT_MS);
+
+  const headers: Record<string, string> = {
+    Accept: "application/json",
+    Authorization: `Bearer ${token}`,
+  };
+
+  if (payload !== undefined) {
+    headers["Content-Type"] = "application/json";
+  }
+
+  try {
+    const response = await fetch(
+      `${API_BASE_URL}${BOOKINGS_PATH}${path}`,
+      {
+        method,
+        headers,
+        body:
+          payload === undefined
+            ? undefined
+            : JSON.stringify(payload),
+        signal: controller.signal,
+      }
+    );
+
+    const responseText = await response.text();
+
+    let body: unknown = null;
+
+    if (responseText) {
+      try {
+        body = JSON.parse(responseText);
+      } catch {
+        // An invalid response is handled below.
+      }
+    }
+
+    if (!response.ok) {
+      const fallback =
+        response.status === 401
+          ? "Your session has expired. Please log in again."
+          : response.status === 403
+          ? "You do not have permission to manage bookings."
+          : response.status === 404
+          ? "Booking not found or booking API unavailable."
+          : `Booking request failed (${response.status}).`;
+
+      throw new BookingApiError(
+        readError(body, fallback),
+        response.status,
+        isMutation && response.status >= 500
+      );
+    }
+
+    if (!body || typeof body !== "object") {
+      throw new BookingApiError(
+        isMutation
+          ? "The booking result could not be verified. Refresh bookings before trying again."
+          : "The backend returned an invalid bookings response.",
+        response.status,
+        isMutation
+      );
+    }
+
+    return body as T;
+  } catch (error: unknown) {
+    if (error instanceof BookingApiError) {
+      throw error;
+    }
+
+    if (signal?.aborted) {
+      throw error;
+    }
+
+    const message = timedOut
+      ? isMutation
+        ? "The booking update timed out. Its result is unknown. Refresh bookings before trying again."
+        : "Loading bookings timed out. Please use Refresh to try again."
+      : isMutation
+      ? "The connection was interrupted. Check the booking status before repeating the update."
+      : "Cannot connect to the KSHURAK backend. Check the server and your phone's network.";
+
+    throw new BookingApiError(message, 0, isMutation);
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener("abort", abortFromCaller);
+  }
+}
+
+export async function getBarberBookings(
+  filters: BookingFilters = {},
+  signal?: AbortSignal
+): Promise<BookingListResponse> {
+  const params = ["include_hairstyle=false"];
+
+  if (filters.status && filters.status !== "all") {
+    params.push(`status=${encodeURIComponent(filters.status)}`);
+  }
+
+  if (filters.dateFrom) {
+    params.push(
+      `date_from=${encodeURIComponent(filters.dateFrom)}`
+    );
+  }
+
+  if (filters.dateTo) {
+    params.push(
+      `date_to=${encodeURIComponent(filters.dateTo)}`
+    );
+  }
+
+  const result = await bookingRequest<BookingListResponse>(
+    `?${params.join("&")}`,
+    "GET",
+    undefined,
+    signal
+  );
+
+  if (!Array.isArray(result.bookings)) {
+    throw new BookingApiError("Invalid bookings list received.");
+  }
+
+  return result;
+}
+
+export async function getBarberBookingById(
+  bookingId: string,
+  signal?: AbortSignal
+): Promise<BarberBooking> {
+  const booking = await bookingRequest<BarberBooking>(
+    bookingPath(bookingId),
+    "GET",
+    undefined,
+    signal
+  );
+
+  if (booking.id !== bookingId.trim()) {
+    throw new BookingApiError("Invalid booking details received.");
+  }
+
+  return booking;
+}
+
+export async function acceptBarberBooking(
+  bookingId: string,
+  workerId?: string | null
+): Promise<BookingActionResponse> {
+  return bookingRequest<BookingActionResponse>(
+    `${bookingPath(bookingId)}/accept`,
+    "POST",
+    { worker_id: workerId?.trim() || null }
+  );
+}
+
+export async function rejectBarberBooking(
+  bookingId: string,
+  reason: string
+): Promise<BookingActionResponse> {
+  const trimmed = reason.trim();
+
+  if (trimmed.length < 3 || trimmed.length > 500) {
+    throw new BookingApiError(
+      "Enter a rejection reason between 3 and 500 characters."
+    );
+  }
+
+  return bookingRequest<BookingActionResponse>(
+    `${bookingPath(bookingId)}/reject`,
+    "POST",
+    { reason: trimmed }
+  );
+}
+
+export async function completeBarberBooking(
+  bookingId: string
+): Promise<BookingActionResponse> {
+  return bookingRequest<BookingActionResponse>(
+    `${bookingPath(bookingId)}/complete`,
+    "POST"
+  );
+}
+
+export async function cancelBarberBooking(
+  bookingId: string,
+  reason: string
+): Promise<BookingActionResponse> {
+  const trimmed = reason.trim();
+
+  if (trimmed.length < 3 || trimmed.length > 500) {
+    throw new BookingApiError(
+      "Enter a cancellation reason between 3 and 500 characters."
+    );
+  }
+
+  return bookingRequest<BookingActionResponse>(
+    `${bookingPath(bookingId)}/cancel`,
+    "POST",
+    { reason: trimmed }
+  );
+}
+</file>
+
+<file path="customersApi.ts">
+import * as SecureStore from "expo-secure-store";
+
+const API_BASE_URL = String(
+  process.env.EXPO_PUBLIC_API_BASE_URL || ""
+).trim().replace(/\/+$/, "");
+
+const CUSTOMERS_PATH = "/api/v1/barber/customers";
+const TOKEN_KEY = "kshurak_barber_token";
+
+export type CustomerRelationship =
+  | "new"
+  | "returning"
+  | "regular"
+  | "inactive";
+
+export interface CustomerSummary {
+  total_customers: number;
+  new_this_month: number;
+  returning_customers: number;
+  regular_customers: number;
+  inactive_customers: number;
+  retention_rate: number;
+}
+
+export interface CustomerProfile {
+  customer_key: string;
+  customer_id: string | null;
+  name: string;
+  phone: string;
+  image_url: string | null;
+  relationship: CustomerRelationship;
+  total_bookings: number;
+  completed_visits: number;
+  total_spent: number;
+  first_booking: string;
+  last_booking: string;
+  last_visit: string | null;
+  favorite_service: string | null;
+  pending_bookings: number;
+  confirmed_bookings: number;
+  cancelled_bookings: number;
+  rejected_bookings: number;
+}
+
+export interface CustomerVisit {
+  booking_id: string;
+  booking_date: string;
+  start_time: string;
+  service_name: string;
+  service_price: number;
+  status: string;
+  customer_notes: string | null;
+}
+
+export interface CustomersResponse {
+  summary: CustomerSummary;
+  customers: CustomerProfile[];
+}
+
+export interface CustomerDetailResponse {
+  customer: CustomerProfile;
+  visits: CustomerVisit[];
+}
+
+export class CustomersApiError extends Error {
+  status: number;
+
+  constructor(message: string, status = 0) {
+    super(message);
+    this.name = "CustomersApiError";
+    this.status = status;
+  }
+}
+
+async function accessToken(): Promise<string> {
+  let token: string | null;
+
+  try {
+    token = await SecureStore.getItemAsync(TOKEN_KEY);
+  } catch {
+    throw new CustomersApiError(
+      "Unable to read your secure login session."
+    );
+  }
+
+  if (!token) {
+    throw new CustomersApiError(
+      "Your Barber session has expired. Please log in again.",
+      401
+    );
+  }
+
+  return token;
+}
+
+function getErrorMessage(status: number, data: unknown): string {
+  let detail = `Customers request failed (${status}).`;
+
+  if (data && typeof data === "object" && "detail" in data) {
+    const value = (data as { detail: unknown }).detail;
+
+    if (typeof value === "string") {
+      detail = value;
+    } else if (Array.isArray(value)) {
+      detail = value.map((item: unknown) => {
+        if (item && typeof item === "object" && "msg" in item) {
+          return String((item as { msg: unknown }).msg);
+        }
+        return String(item);
+      }).join(", ");
+    } else if (
+      value &&
+      typeof value === "object" &&
+      "message" in value
+    ) {
+      detail = String((value as { message: unknown }).message);
+    }
+  }
+
+  if (status === 401) {
+    return "Your login session is invalid or expired. Please log in again.";
+  }
+  if (status === 403) {
+    return "You do not have permission to view customers.";
+  }
+  if (status === 404) {
+    return "Customer not found or the Customers API is unavailable.";
+  }
+
+  return detail;
+}
+
+async function customersRequest<T>(
+  path: string,
+  signal?: AbortSignal
+): Promise<T> {
+  if (!/^https?:\/\/[^/]+/i.test(API_BASE_URL)) {
+    throw new CustomersApiError(
+      "EXPO_PUBLIC_API_BASE_URL is missing or invalid."
+    );
+  }
+
+  const token = await accessToken();
+  let response: Response;
+
+  try {
+    response = await fetch(
+      `${API_BASE_URL}${CUSTOMERS_PATH}${path}`,
+      {
+        method: "GET",
+        signal,
+        headers: {
+          Authorization: `Bearer ${token}`,
+          Accept: "application/json",
+        },
+      }
+    );
+  } catch (error: unknown) {
+    if (
+      signal?.aborted ||
+      (error instanceof Error && error.name === "AbortError")
+    ) {
+      throw error;
+    }
+
+    throw new CustomersApiError(
+      "Unable to connect to KSHURAK. Check your backend and phone network."
+    );
+  }
+
+  const data: unknown = await response.json().catch(() => null);
+
+  if (!response.ok) {
+    throw new CustomersApiError(
+      getErrorMessage(response.status, data),
+      response.status
+    );
+  }
+
+  if (data === null || data === undefined) {
+    throw new CustomersApiError(
+      "The Customers API returned an empty response."
+    );
+  }
+
+  return data as T;
+}
+
+export async function getShopCustomers(
+  signal?: AbortSignal
+): Promise<CustomersResponse> {
+  const result = await customersRequest<CustomersResponse>("", signal);
+
+  if (
+    !result ||
+    !result.summary ||
+    !Array.isArray(result.customers)
+  ) {
+    throw new CustomersApiError(
+      "Invalid Customers API response received."
+    );
+  }
+
+  return result;
+}
+
+export async function getShopCustomerDetails(
+  customerKey: string,
+  signal?: AbortSignal
+): Promise<CustomerDetailResponse> {
+  if (!customerKey.trim()) {
+    throw new CustomersApiError("Customer identification is missing.");
+  }
+
+  const result = await customersRequest<CustomerDetailResponse>(
+    `/${encodeURIComponent(customerKey)}`,
+    signal
+  );
+
+  if (
+    !result ||
+    !result.customer ||
+    !Array.isArray(result.visits)
+  ) {
+    throw new CustomersApiError(
+      "Invalid customer profile response received."
+    );
+  }
+
+  return result;
+}
+</file>
+
+<file path="notificationsApi.ts">
+import * as SecureStore from "expo-secure-store";
+
+const API_BASE_URL = String(
+  process.env.EXPO_PUBLIC_API_BASE_URL || ""
+).trim().replace(/\/+$/, "");
+
+const ENDPOINT = `${API_BASE_URL}/api/v1/barber/notifications`;
+
+export type NotificationType =
+  | "new_booking"
+  | "booking_accepted"
+  | "booking_rejected"
+  | "booking_cancelled"
+  | "booking_completed"
+  | "reschedule_requested"
+  | "reschedule_approved"
+  | "reschedule_declined"
+  | "reschedule_withdrawn"
+  | "appointment_reminder"
+  | "shop_update"
+  | "account_alert"
+  | "general";
+
+export type NotificationCategory =
+  | "all"
+  | "booking"
+  | "rescheduling"
+  | "other";
+
+export interface BarberNotification {
+  id: string;
+  recipient_type: "barber" | "customer" | "admin";
+  recipient_id: string;
+  notification_type: NotificationType;
+  title: string;
+  message: string;
+  reference_type: string | null;
+  reference_id: string | null;
+  action_url: string | null;
+  metadata: Record<string, unknown>;
+  is_read: boolean;
+  read_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface NotificationCounts {
+  total: number;
+  unread: number;
+  booking: number;
+  rescheduling: number;
+  other: number;
+}
+
+export interface NotificationListResponse {
+  notifications: BarberNotification[];
+  total: number;
+  limit: number;
+  offset: number;
+  counts: NotificationCounts;
+}
+
+export interface UnreadCountResponse {
+  unread_count: number;
+}
+
+export interface NotificationActionResponse {
+  message: string;
+  notification: BarberNotification;
+}
+
+export interface MarkAllReadResponse {
+  message: string;
+  updated_count: number;
+  unread_count: number;
+}
+
+export interface NotificationFilters {
+  category?: NotificationCategory;
+  unreadOnly?: boolean;
+  limit?: number;
+  offset?: number;
+}
+
+export class NotificationsApiError extends Error {
+  status: number;
+
+  constructor(message: string, status = 0) {
+    super(message);
+    this.name = "NotificationsApiError";
+    this.status = status;
+  }
+}
+
+async function getAccessToken(): Promise<string> {
+  let token: string | null;
+
+  try {
+    token = await SecureStore.getItemAsync("kshurak_barber_token");
+  } catch {
+    throw new NotificationsApiError(
+      "Unable to read your secure login session."
+    );
+  }
+
+  if (!token) {
+    throw new NotificationsApiError(
+      "Your Barber session has expired. Please log in again.",
+      401
+    );
+  }
+
+  return token;
+}
+
+function getErrorMessage(status: number, data: unknown): string {
+  let detail = `Notification request failed (${status}).`;
+
+  if (data && typeof data === "object" && "detail" in data) {
+    const value = (data as { detail: unknown }).detail;
+
+    if (typeof value === "string") {
+      detail = value;
+    } else if (Array.isArray(value)) {
+      detail = value.map((item: unknown) => {
+        if (item && typeof item === "object" && "msg" in item) {
+          return String((item as { msg: unknown }).msg);
+        }
+        return String(item);
+      }).join(", ");
+    } else if (
+      value &&
+      typeof value === "object" &&
+      "message" in value
+    ) {
+      detail = String((value as { message: unknown }).message);
+    }
+  }
+
+  if (status === 401) {
+    return "Your login session is invalid or expired. Please log in again.";
+  }
+  if (status === 403) return `Access denied: ${detail}`;
+  if (status === 404) {
+    return "Notification not found or the Notifications API is unavailable.";
+  }
+
+  return detail;
+}
+
+async function notificationRequest<T>(
+  path: string,
+  method: "GET" | "POST" | "PATCH" = "GET",
+  body?: unknown,
+  signal?: AbortSignal
+): Promise<T> {
+  if (!/^https?:\/\/[^/]+/i.test(API_BASE_URL)) {
+    throw new NotificationsApiError(
+      "EXPO_PUBLIC_API_BASE_URL is missing or invalid."
+    );
+  }
+
+  const token = await getAccessToken();
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${token}`,
+    Accept: "application/json",
+  };
+
+  if (body !== undefined) {
+    headers["Content-Type"] = "application/json";
+  }
+
+  let response: Response;
+
+  try {
+    response = await fetch(`${ENDPOINT}${path}`, {
+      method,
+      headers,
+      body: body === undefined ? undefined : JSON.stringify(body),
+      signal,
+    });
+  } catch (error: unknown) {
+    if (
+      signal?.aborted ||
+      (error instanceof Error && error.name === "AbortError")
+    ) {
+      throw error;
+    }
+
+    throw new NotificationsApiError(
+      "Unable to connect to KSHURAK. Check the server and your connection."
+    );
+  }
+
+  const data: unknown = await response.json().catch(() => null);
+
+  if (!response.ok) {
+    throw new NotificationsApiError(
+      getErrorMessage(response.status, data),
+      response.status
+    );
+  }
+
+  if (data === null || data === undefined) {
+    throw new NotificationsApiError(
+      "The Notifications API returned an empty response."
+    );
+  }
+
+  return data as T;
+}
+
+function safeInteger(value: number | undefined, fallback: number): number {
+  return typeof value === "number" && Number.isFinite(value)
+    ? Math.floor(value)
+    : fallback;
+}
+
+export async function getNotifications(
+  filters: NotificationFilters = {},
+  signal?: AbortSignal
+): Promise<NotificationListResponse> {
+  const limit = Math.min(100, Math.max(1, safeInteger(filters.limit, 30)));
+  const offset = Math.max(0, safeInteger(filters.offset, 0));
+
+  const params = [
+    `category=${encodeURIComponent(filters.category || "all")}`,
+    `limit=${limit}`,
+    `offset=${offset}`,
+  ];
+
+  if (filters.unreadOnly !== undefined) {
+    params.push(`unread_only=${String(filters.unreadOnly)}`);
+  }
+
+  const result = await notificationRequest<NotificationListResponse>(
+    `?${params.join("&")}`,
+    "GET",
+    undefined,
+    signal
+  );
+
+  if (
+    !result ||
+    !Array.isArray(result.notifications) ||
+    !result.counts ||
+    !Number.isFinite(result.total) ||
+    result.total < 0
+  ) {
+    throw new NotificationsApiError(
+      "Invalid notification list received from the backend."
+    );
+  }
+
+  return result;
+}
+
+export function getUnreadNotificationCount(
+  signal?: AbortSignal
+): Promise<UnreadCountResponse> {
+  return notificationRequest("/unread-count", "GET", undefined, signal);
+}
+
+export function getNotificationById(
+  notificationId: string,
+  signal?: AbortSignal
+): Promise<BarberNotification> {
+  return notificationRequest(
+    `/${encodeURIComponent(notificationId)}`,
+    "GET",
+    undefined,
+    signal
+  );
+}
+
+export function markNotificationAsRead(
+  notificationId: string
+): Promise<NotificationActionResponse> {
+  return notificationRequest(
+    `/${encodeURIComponent(notificationId)}/read`,
+    "PATCH"
+  );
+}
+
+export function markAllNotificationsAsRead(): Promise<MarkAllReadResponse> {
+  return notificationRequest("/read-all", "POST");
+}
+</file>
+
+<file path="registrationCorrectionApi.ts">
+const API_BASE_URL = String(
+  process.env.EXPO_PUBLIC_API_BASE_URL || ""
+)
+  .trim()
+  .replace(/\/+$/, "");
+
+const CORRECTION_PATH =
+  "/api/v1/barber/registration-correction";
+
+const REQUEST_TIMEOUT_MS = Number(
+  process.env.EXPO_PUBLIC_CORRECTION_REQUEST_TIMEOUT_MS ||
+    "30000"
+);
+
+const IMAGE_TYPES = [
+  "image/jpeg",
+  "image/png",
+  "image/webp",
+];
+
+const DOCUMENT_TYPES = [
+  ...IMAGE_TYPES,
+  "application/pdf",
+];
+
+const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
+const MAX_DOCUMENT_BYTES = 5 * 1024 * 1024;
+const MAX_DOCUMENTS = 5;
+
+export interface CorrectionFile {
+  uri: string;
+  name: string;
+  mimeType: string;
+  size: number;
+}
+
+export interface CorrectionDocument {
+  path: string;
+  original_name?: string;
+  content_type?: string;
+  size?: number;
+  document_type?: string;
+  signed_url?: string | null;
+}
+
+export interface RegistrationCorrectionDetails {
+  barber_id: string;
+  username: string;
+  email: string;
+  approval_status: "needs_correction";
+
+  shop_name: string | null;
+  shop_phone: string | null;
+  shop_address: string;
+  years_experience: number;
+
+  correction_reason: string;
+  correction_requested_at: string;
+  token_expires_at: string;
+
+  shop_image_url: string | null;
+  documents: CorrectionDocument[];
+  signed_url_expires_in: number;
+}
+
+export interface RegistrationCorrectionPayload {
+  token: string;
+  shop_name: string;
+  shop_phone: string;
+  shop_address: string;
+  years_experience: number;
+
+  shop_image?: CorrectionFile | null;
+
+  // A non-empty set replaces all saved verification documents.
+  // An empty set retains the existing documents.
+  shop_documents?: CorrectionFile[];
+}
+
+export interface RegistrationCorrectionResult {
+  barber_id: string;
+  approval_status: "pending";
+  correction_resubmitted_at: string;
+  message: string;
+}
+
+export class RegistrationCorrectionError extends Error {
+  readonly status: number;
+  readonly outcomeUnknown: boolean;
+
+  constructor(
+    message: string,
+    status = 0,
+    outcomeUnknown = false
+  ) {
+    super(message);
+    this.name = "RegistrationCorrectionError";
+    this.status = status;
+    this.outcomeUnknown = outcomeUnknown;
+  }
+}
+
+function isRecord(
+  value: unknown
+): value is Record<string, unknown> {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    !Array.isArray(value)
+  );
+}
+
+function isNullableString(value: unknown): boolean {
+  return value === null || typeof value === "string";
+}
+
+function isTimestamp(value: unknown): boolean {
+  return (
+    typeof value === "string" &&
+    Number.isFinite(Date.parse(value))
+  );
+}
+
+function requireBaseUrl(): string {
+  try {
+    const url = new URL(API_BASE_URL);
+
+    if (
+      !["http:", "https:"].includes(url.protocol) ||
+      url.username ||
+      url.password ||
+      url.search ||
+      url.hash
+    ) {
+      throw new Error("Invalid API address.");
+    }
+
+    return API_BASE_URL;
+  } catch {
+    throw new RegistrationCorrectionError(
+      "EXPO_PUBLIC_API_BASE_URL is missing or invalid.",
+      422
+    );
+  }
+}
+
+function requireToken(token: string): string {
+  const value = token.trim();
+
+  if (value.length < 32 || value.length > 512) {
+    throw new RegistrationCorrectionError(
+      "This correction link is invalid. Please request a new link from Admin.",
+      401
+    );
+  }
+
+  return value;
+}
+
+function getErrorMessage(
+  data: unknown,
+  responseStatus: number
+): string {
+  if (isRecord(data)) {
+    const detail = data.detail;
+
+    if (typeof detail === "string") {
+      return detail;
+    }
+
+    if (
+      isRecord(detail) &&
+      typeof detail.message === "string"
+    ) {
+      return detail.message;
+    }
+
+    if (Array.isArray(detail)) {
+      const messages = detail.flatMap(
+        (item: unknown) => {
+          if (
+            !isRecord(item) ||
+            typeof item.msg !== "string"
+          ) {
+            return [];
+          }
+
+          const field = Array.isArray(item.loc)
+            ? item.loc
+                .filter((part) => part !== "body")
+                .map(String)
+                .join(".")
+            : "";
+
+          return [
+            field
+              ? `${field}: ${item.msg}`
+              : item.msg,
+          ];
+        }
+      );
+
+      if (messages.length) {
+        return messages.join("\n");
+      }
+    }
+  }
+
+  switch (responseStatus) {
+    case 401:
+      return (
+        "This correction link is invalid, expired or already used. " +
+        "Please request a new link from Admin."
+      );
+
+    case 409:
+      return (
+        "This registration is no longer awaiting corrections. " +
+        "Reload the application status."
+      );
+
+    case 413:
+      return "An uploaded file exceeds the allowed size.";
+
+    case 429:
+      return "Too many requests. Please wait before trying again.";
+
+    case 503:
+      return "The correction service is temporarily unavailable.";
+
+    default:
+      return "Unable to complete the request. Please try again.";
+  }
+}
+
+async function postCorrectionRequest(
+  endpoint: "/validate" | "/resubmit",
+  body: string | FormData,
+  isJson: boolean,
+  externalSignal?: AbortSignal
+): Promise<unknown> {
+  const baseUrl = requireBaseUrl();
+
+  if (
+    !Number.isFinite(REQUEST_TIMEOUT_MS) ||
+    REQUEST_TIMEOUT_MS <= 0
+  ) {
+    throw new RegistrationCorrectionError(
+      "EXPO_PUBLIC_CORRECTION_REQUEST_TIMEOUT_MS must be a positive number.",
+      422
+    );
+  }
+
+  const controller = new AbortController();
+  const isSubmission = endpoint === "/resubmit";
+
+  let timedOut = false;
+
+  const abortFromCaller = () => {
+    controller.abort();
+  };
+
+  if (externalSignal?.aborted) {
+    controller.abort();
+  } else {
+    externalSignal?.addEventListener(
+      "abort",
+      abortFromCaller,
+      { once: true }
+    );
+  }
+
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, REQUEST_TIMEOUT_MS);
+
+  try {
+    const response = await fetch(
+      `${baseUrl}${CORRECTION_PATH}${endpoint}`,
+      {
+        method: "POST",
+        headers: {
+          Accept: "application/json",
+          ...(isJson
+            ? { "Content-Type": "application/json" }
+            : {}),
+        },
+        body,
+        signal: controller.signal,
+      }
+    );
+
+    // Keep the timeout active while reading the response body.
+    const data: unknown = await response
+      .json()
+      .catch((error: unknown) => {
+        if (controller.signal.aborted) {
+          throw error;
+        }
+
+        return null;
+      });
+
+    if (!response.ok) {
+      throw new RegistrationCorrectionError(
+        getErrorMessage(data, response.status),
+        response.status,
+        isSubmission && response.status >= 500
+      );
+    }
+
+    if (data === null) {
+      throw new RegistrationCorrectionError(
+        isSubmission
+          ? "The submission response could not be verified. Reload the application status before retrying."
+          : "The correction service returned an invalid response.",
+        0,
+        isSubmission
+      );
+    }
+
+    return data;
+  } catch (error: unknown) {
+    if (externalSignal?.aborted) {
+      throw error;
+    }
+
+    if (error instanceof RegistrationCorrectionError) {
+      throw error;
+    }
+
+    throw new RegistrationCorrectionError(
+      isSubmission
+        ? (
+            timedOut
+              ? "The submission timed out. "
+              : "The connection was interrupted. "
+          ) +
+            "Your submission outcome is unknown. Reload the application status before retrying."
+        : timedOut
+          ? "Loading your application timed out. Check your connection and retry validation."
+          : "Unable to connect to KSHURAK. Check your connection and backend address.",
+      0,
+      isSubmission
+    );
+  } finally {
+    clearTimeout(timer);
+
+    externalSignal?.removeEventListener(
+      "abort",
+      abortFromCaller
+    );
+  }
+}
+
+function appendFile(
+  form: FormData,
+  field: string,
+  file: CorrectionFile,
+  imageOnly: boolean
+): void {
+  const allowed = imageOnly
+    ? IMAGE_TYPES
+    : DOCUMENT_TYPES;
+
+  const maximum = imageOnly
+    ? MAX_IMAGE_BYTES
+    : MAX_DOCUMENT_BYTES;
+
+  if (
+    !file.uri ||
+    !file.name ||
+    !allowed.includes(file.mimeType) ||
+    !Number.isFinite(file.size) ||
+    file.size <= 0 ||
+    file.size > maximum
+  ) {
+    throw new RegistrationCorrectionError(
+      imageOnly
+        ? "Select a valid JPEG, PNG or WebP shop image up to 8 MB."
+        : "Select valid PDF, JPEG, PNG or WebP documents up to 5 MB each.",
+      422
+    );
+  }
+
+  // React Native accepts local file descriptors in FormData.
+  form.append(
+    field,
+    {
+      uri: file.uri,
+      name: file.name,
+      type: file.mimeType,
+    } as unknown as Blob
+  );
+}
+
+export async function validateRegistrationCorrection(
+  token: string,
+  signal?: AbortSignal
+): Promise<RegistrationCorrectionDetails> {
+  const data = await postCorrectionRequest(
+    "/validate",
+    JSON.stringify({
+      token: requireToken(token),
+    }),
+    true,
+    signal
+  );
+
+  if (
+    !isRecord(data) ||
+    typeof data.barber_id !== "string" ||
+    typeof data.username !== "string" ||
+    typeof data.email !== "string" ||
+    data.approval_status !== "needs_correction" ||
+    !isNullableString(data.shop_name) ||
+    !isNullableString(data.shop_phone) ||
+    typeof data.shop_address !== "string" ||
+    typeof data.years_experience !== "number" ||
+    !Number.isInteger(data.years_experience) ||
+    data.years_experience < 0 ||
+    data.years_experience > 50 ||
+    typeof data.correction_reason !== "string" ||
+    !isTimestamp(data.correction_requested_at) ||
+    !isTimestamp(data.token_expires_at) ||
+    !isNullableString(data.shop_image_url) ||
+    typeof data.signed_url_expires_in !== "number" ||
+    !Number.isFinite(data.signed_url_expires_in) ||
+    !Array.isArray(data.documents) ||
+    !data.documents.every(
+      (document: unknown) =>
+        isRecord(document) &&
+        typeof document.path === "string" &&
+        (
+          document.original_name === undefined ||
+          typeof document.original_name === "string"
+        ) &&
+        (
+          document.signed_url === undefined ||
+          isNullableString(document.signed_url)
+        )
+    )
+  ) {
+    throw new RegistrationCorrectionError(
+      "The backend returned an unexpected correction response. Please contact support."
+    );
+  }
+
+  return data as unknown as RegistrationCorrectionDetails;
+}
+
+export async function resubmitRegistrationCorrection(
+  payload: RegistrationCorrectionPayload
+): Promise<RegistrationCorrectionResult> {
+  const documents = payload.shop_documents ?? [];
+
+  if (documents.length > MAX_DOCUMENTS) {
+    throw new RegistrationCorrectionError(
+      "Select a maximum of 5 verification documents.",
+      422
+    );
+  }
+
+  const form = new FormData();
+
+  form.append("token", requireToken(payload.token));
+  form.append("shop_name", payload.shop_name.trim());
+  form.append("shop_phone", payload.shop_phone.trim());
+  form.append("shop_address", payload.shop_address.trim());
+  form.append(
+    "years_experience",
+    String(payload.years_experience)
+  );
+
+  if (payload.shop_image) {
+    appendFile(
+      form,
+      "shop_image",
+      payload.shop_image,
+      true
+    );
+  }
+
+  for (const document of documents) {
+    appendFile(
+      form,
+      "shop_documents",
+      document,
+      false
+    );
+  }
+
+  // Do not set Content-Type manually.
+  // React Native supplies the multipart boundary.
+  const data = await postCorrectionRequest(
+    "/resubmit",
+    form,
+    false
+  );
+
+  if (
+    !isRecord(data) ||
+    typeof data.barber_id !== "string" ||
+    data.approval_status !== "pending" ||
+    !isTimestamp(data.correction_resubmitted_at) ||
+    typeof data.message !== "string"
+  ) {
+    throw new RegistrationCorrectionError(
+      "The submission response was unexpected. Reload the application status before retrying.",
+      0,
+      true
+    );
+  }
+
+  return data as unknown as RegistrationCorrectionResult;
+}
+</file>
+
+<file path="reschedulingApi.ts">
+import * as SecureStore from "expo-secure-store";
+
+// ============================================================
+// CONFIGURATION
+// ============================================================
+
+const API_BASE_URL = String(
+  process.env.EXPO_PUBLIC_API_BASE_URL || ""
+)
+  .trim()
+  .replace(/\/+$/, "");
+
+const RESCHEDULING_ENDPOINT =
+  `${API_BASE_URL}/api/v1/barber/rescheduling`;
+
+const PRIMARY_TOKEN_KEY = "kshurak_barber_token";
+const LEGACY_TOKEN_KEY = "barber_access_token";
+
+// ============================================================
+// TYPES - MATCH WEB APP
+// ============================================================
+
+export type RescheduleStatus =
+  | "pending"
+  | "approved"
+  | "declined"
+  | "cancelled";
+
+export type RescheduleRequester =
+  | "barber"
+  | "customer";
+
+export type RescheduleRequestKind =
+  | "appointment_change"
+  | "worker_unavailability";
+
+export type RecoveryOptionType =
+  | "cancel_booking"
+  | "same_worker_other_day"
+  | "other_worker_same_day";
+
+// ============================================================
+// RECOVERY OPTIONS
+// ============================================================
+
+export interface RecoveryOption {
+  id: string;
+  request_id: string;
+  option_type: RecoveryOptionType;
+
+  worker_id: string | null;
+
+  appointment_date: string | null;
+  start_time: string | null;
+  end_time: string | null;
+
+  created_at: string;
+}
+
+// ============================================================
+// RESCHEDULE REQUEST
+// ============================================================
+
+export interface RescheduleRequest {
+  id: string;
+  booking_id: string;
+
+  requested_by: RescheduleRequester;
+
+  requested_date: string;
+  requested_start_time: string;
+  requested_end_time: string;
+
+  requested_worker_id: string | null;
+
+  original_date: string;
+  original_start_time: string;
+  original_end_time: string;
+
+  original_worker_id: string | null;
+
+  status: RescheduleStatus;
+
+  reason: string | null;
+  decision_reason: string | null;
+
+  decided_by: RescheduleRequester | null;
+  decided_at: string | null;
+
+  created_at: string;
+  updated_at: string;
+
+  customer_name: string;
+  customer_phone: string;
+
+  service_name: string;
+  service_price: number;
+
+  booking_status: string;
+
+  request_kind: RescheduleRequestKind;
+
+  selected_option_type:
+    | RecoveryOptionType
+    | null;
+
+  options: RecoveryOption[];
+}
+
+// ============================================================
+// COUNTS AND RESPONSES
+// ============================================================
+
+export interface RescheduleCounts {
+  pending: number;
+  approved: number;
+  declined: number;
+  cancelled: number;
+}
+
+export interface RescheduleListResponse {
+  requests: RescheduleRequest[];
+  total: number;
+  counts: RescheduleCounts;
+}
+
+export interface RescheduleActionResponse {
+  message: string;
+  request: RescheduleRequest;
+}
+
+// ============================================================
+// ELIGIBLE BOOKINGS - EXACT WEB APP TYPE STRUCTURE
+// ============================================================
+
+export interface EligibleRescheduleBooking {
+  id: string;
+
+  barber_id: string;
+  worker_id: string;
+  customer_id: string;
+
+  customer_name: string;
+  customer_phone: string;
+  customer_image_url: string | null;
+
+  worker_name: string | null;
+
+  service_name: string;
+  service_duration_minutes: number;
+  service_price: number | string;
+
+  booking_date: string;
+  start_time: string;
+  end_time: string;
+
+  status: "confirmed";
+
+  confirmed_at: string;
+  created_at: string;
+  updated_at: string;
+
+  reschedule_deadline: string;
+}
+
+export interface EligibleBookingsResponse {
+  bookings: EligibleRescheduleBooking[];
+  total: number;
+  server_time: string;
+  limit: number;
+}
+
+// ============================================================
+// NORMAL RESCHEDULE PAYLOAD
+// ============================================================
+
+export interface CreateReschedulePayload {
+  booking_id: string;
+
+  requested_date: string;
+  requested_start_time: string;
+  requested_end_time: string;
+
+  requested_worker_id?: string | null;
+
+  reason: string;
+}
+
+// ============================================================
+// THREE-OPTION WORKER UNAVAILABILITY PAYLOAD
+// ============================================================
+
+export interface CancellationOptionInput {
+  option_type: "cancel_booking";
+}
+
+export interface AppointmentOptionInput {
+  option_type:
+    | "same_worker_other_day"
+    | "other_worker_same_day";
+
+  worker_id: string;
+  appointment_date: string;
+  start_time: string;
+  end_time: string;
+}
+
+export type RecoveryOptionInput =
+  | CancellationOptionInput
+  | AppointmentOptionInput;
+
+export interface CreateWorkerUnavailabilityPayload {
+  booking_id: string;
+  reason: string;
+  options: RecoveryOptionInput[];
+}
+
+// ============================================================
+// API ERROR
+// ============================================================
+
+export class ReschedulingApiError extends Error {
+  readonly status: number;
+  readonly code: string | null;
+  readonly deadline: string | null;
+
+  /**
+   * A mutation may have succeeded even though the
+   * client could not verify its response.
+   *
+   * The screen must refresh the requests before
+   * allowing another submission.
+   */
+  readonly outcomeUnknown: boolean;
+
+  constructor(
+    message: string,
+    status = 0,
+    code: string | null = null,
+    deadline: string | null = null,
+    outcomeUnknown = false
+  ) {
+    super(message);
+
+    this.name = "ReschedulingApiError";
+    this.status = status;
+    this.code = code;
+    this.deadline = deadline;
+    this.outcomeUnknown = outcomeUnknown;
+
+    Object.setPrototypeOf(
+      this,
+      ReschedulingApiError.prototype
+    );
+  }
+}
+
+// ============================================================
+// INTERNAL HELPERS
+// ============================================================
+
+function isRecord(
+  value: unknown
+): value is Record<string, unknown> {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    !Array.isArray(value)
+  );
+}
+
+// ============================================================
+// ENVIRONMENT CONFIGURATION
+// ============================================================
+
+function validateApiConfiguration(): void {
+  if (
+    !/^https?:\/\/[^/]+/i.test(API_BASE_URL)
+  ) {
+    throw new ReschedulingApiError(
+      "EXPO_PUBLIC_API_BASE_URL is missing or invalid.",
+      0,
+      "API_URL_REQUIRED"
+    );
+  }
+}
+
+// ============================================================
+// MOBILE SECURE TOKEN ACCESS
+// ============================================================
+
+async function getAccessToken(): Promise<string> {
+  let token: string | null = null;
+
+  try {
+    token = await SecureStore.getItemAsync(
+      PRIMARY_TOKEN_KEY
+    );
+
+    // Compatibility with older mobile sessions.
+    if (!token?.trim()) {
+      token = await SecureStore.getItemAsync(
+        LEGACY_TOKEN_KEY
+      );
+    }
+  } catch {
+    throw new ReschedulingApiError(
+      "Unable to read your secure barber login session.",
+      0,
+      "SESSION_READ_FAILED"
+    );
+  }
+
+  if (!token?.trim()) {
+    throw new ReschedulingApiError(
+      "Your barber session has expired. Please log in again.",
+      401,
+      "SESSION_REQUIRED"
+    );
+  }
+
+  return token.trim();
+}
+
+// ============================================================
+// ABORT HANDLING
+// ============================================================
+
+function checkAborted(
+  signal?: AbortSignal
+): void {
+  if (!signal?.aborted) return;
+
+  const error = new Error(
+    "The request was cancelled."
+  );
+
+  error.name = "AbortError";
+
+  throw error;
+}
+
+function isAbortError(
+  error: unknown,
+  signal?: AbortSignal
+): boolean {
+  return (
+    signal?.aborted === true ||
+    (
+      error instanceof Error &&
+      error.name === "AbortError"
+    )
+  );
+}
+
+// ============================================================
+// VALIDATE REQUEST ID
+// ============================================================
+
+function requestPath(
+  requestId: string
+): string {
+  const id = requestId.trim();
+
+  if (!id) {
+    throw new ReschedulingApiError(
+      "The rescheduling request ID is missing.",
+      0,
+      "REQUEST_ID_REQUIRED"
+    );
+  }
+
+  return `/${encodeURIComponent(id)}`;
+}
+
+// ============================================================
+// VALIDATE DATE
+// ============================================================
+
+function validDate(
+  value: string
+): boolean {
+  if (
+    !/^\d{4}-\d{2}-\d{2}$/.test(value)
+  ) {
+    return false;
+  }
+
+  const date = new Date(
+    `${value}T12:00:00Z`
+  );
+
+  return (
+    Number.isFinite(date.getTime()) &&
+    date.toISOString().slice(0, 10) === value
+  );
+}
+
+// ============================================================
+// TIME HELPERS
+// ============================================================
+
+function minutesOfDay(
+  value: string
+): number {
+  const match =
+    /^([01]\d|2[0-3]):([0-5]\d)(?::00)?$/.exec(
+      value
+    );
+
+  if (!match) {
+    throw new ReschedulingApiError(
+      "Appointment times must use HH:mm with whole minutes.",
+      0,
+      "INVALID_APPOINTMENT_TIME"
+    );
+  }
+
+  return (
+    Number(match[1]) * 60 +
+    Number(match[2])
+  );
+}
+
+function validateTimeRange(
+  start: string,
+  end: string
+): void {
+  if (
+    minutesOfDay(end) <=
+    minutesOfDay(start)
+  ) {
+    throw new ReschedulingApiError(
+      "The appointment end time must be after its start time.",
+      0,
+      "INVALID_TIME_RANGE"
+    );
+  }
+}
+
+function validateAppointment(
+  date: string,
+  start: string,
+  end: string
+): void {
+  if (!validDate(date)) {
+    throw new ReschedulingApiError(
+      "Enter a valid appointment date in YYYY-MM-DD format.",
+      0,
+      "INVALID_APPOINTMENT_DATE"
+    );
+  }
+
+  validateTimeRange(start, end);
+}
+
+// ============================================================
+// VALIDATE REASONS
+// ============================================================
+
+function cleanReason(
+  reason: string
+): string {
+  const value = reason.trim();
+
+  if (
+    value.length < 3 ||
+    value.length > 1000
+  ) {
+    throw new ReschedulingApiError(
+      "Please provide a reason containing 3 to 1000 characters.",
+      0,
+      "INVALID_REASON"
+    );
+  }
+
+  return value;
+}
+
+function cleanDecisionReason(
+  reason?: string
+): string | null {
+  const value =
+    reason?.trim() || null;
+
+  if (
+    value &&
+    value.length > 1000
+  ) {
+    throw new ReschedulingApiError(
+      "The response must not exceed 1000 characters.",
+      0,
+      "INVALID_DECISION_REASON"
+    );
+  }
+
+  return value;
+}
+
+// ============================================================
+// PARSE BACKEND ERRORS
+// ============================================================
+
+function parseError(
+  payload: unknown,
+  status: number,
+  isMutation: boolean
+): ReschedulingApiError {
+  let message =
+    `Rescheduling request failed (${status}).`;
+
+  let code: string | null = null;
+  let deadline: string | null = null;
+
+  const detail = isRecord(payload)
+    ? payload.detail ?? payload
+    : payload;
+
+  if (typeof detail === "string") {
+    message = detail;
+  } else if (
+    Array.isArray(detail)
+  ) {
+    const messages = detail.flatMap(
+      (item: unknown) => {
+        if (
+          isRecord(item) &&
+          typeof item.msg === "string"
+        ) {
+          return [item.msg];
+        }
+
+        return [];
+      }
+    );
+
+    if (messages.length > 0) {
+      message = messages.join(" ");
+    }
+  } else if (
+    isRecord(detail)
+  ) {
+    if (
+      typeof detail.message === "string"
+    ) {
+      message = detail.message;
+    }
+
+    if (
+      typeof detail.code === "string"
+    ) {
+      code = detail.code;
+    }
+
+    if (
+      typeof detail.deadline === "string"
+    ) {
+      deadline = detail.deadline;
+    }
+  }
+
+  if (status === 401) {
+    message =
+      "Your login session is invalid or expired. Please log in again.";
+  }
+
+  return new ReschedulingApiError(
+    message,
+    status,
+    code,
+    deadline,
+    isMutation && status >= 500
+  );
+}
+
+// ============================================================
+// INVALID RESPONSE
+// ============================================================
+
+function invalidResponse(
+  isMutation: boolean,
+  status = 200
+): ReschedulingApiError {
+  return new ReschedulingApiError(
+    isMutation
+      ? "The result could not be verified. Refresh requests before submitting again."
+      : "The backend returned an invalid rescheduling response.",
+    status,
+    "INVALID_RESPONSE",
+    null,
+    isMutation
+  );
+}
+
+// ============================================================
+// AUTHENTICATED API REQUEST
+// ============================================================
+
+async function requestApi<T>(
+  path: string,
+  options: RequestInit = {}
+): Promise<T> {
+  validateApiConfiguration();
+
+  checkAborted(
+    options.signal ?? undefined
+  );
+
+  const token = await getAccessToken();
+
+  checkAborted(
+    options.signal ?? undefined
+  );
+
+  const method = (
+    options.method || "GET"
+  ).toUpperCase();
+
+  const isMutation = method !== "GET";
+
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${token}`,
+    Accept: "application/json",
+  };
+
+  if (
+    options.body !== undefined
+  ) {
+    headers["Content-Type"] =
+      "application/json";
+  }
+
+  let response: Response;
+
+  try {
+    response = await fetch(
+      `${RESCHEDULING_ENDPOINT}${path}`,
+      {
+        ...options,
+        method,
+        headers,
+        cache: "no-store",
+      }
+    );
+  } catch (error: unknown) {
+    if (
+      isAbortError(
+        error,
+        options.signal ?? undefined
+      )
+    ) {
+      throw error;
+    }
+
+    throw new ReschedulingApiError(
+      isMutation
+        ? "Unable to confirm the result. Refresh requests before submitting again."
+        : "Unable to connect to KSHURAK. Check your internet connection and backend.",
+      0,
+      "NETWORK_ERROR",
+      null,
+      isMutation
+    );
+  }
+
+  // ==========================================================
+  // READ RESPONSE
+  // ==========================================================
+
+  let payload: unknown;
+
+  try {
+    payload = await response.json();
+  } catch (error: unknown) {
+    if (
+      isAbortError(
+        error,
+        options.signal ?? undefined
+      )
+    ) {
+      throw error;
+    }
+
+    if (!response.ok) {
+      throw parseError(
+        null,
+        response.status,
+        isMutation
+      );
+    }
+
+    throw invalidResponse(
+      isMutation,
+      response.status
+    );
+  }
+
+  // ==========================================================
+  // HTTP ERROR
+  // ==========================================================
+
+  if (!response.ok) {
+    throw parseError(
+      payload,
+      response.status,
+      isMutation
+    );
+  }
+
+  // ==========================================================
+  // RESPONSE STRUCTURE
+  // ==========================================================
+
+  if (!isRecord(payload)) {
+    throw invalidResponse(
+      isMutation,
+      response.status
+    );
+  }
+
+  return payload as T;
+}
+
+// ============================================================
+// GET RESCHEDULE REQUESTS
+//
+// GET /api/v1/barber/rescheduling
+// GET /api/v1/barber/rescheduling?status=pending
+// ============================================================
+
+export async function getRescheduleRequests(
+  status?: RescheduleStatus,
+  signal?: AbortSignal
+): Promise<RescheduleListResponse> {
+  const params = new URLSearchParams();
+
+  if (status) {
+    params.set(
+      "status",
+      status
+    );
+  }
+
+  const query =
+    params.toString();
+
+  const response =
+    await requestApi<RescheduleListResponse>(
+      query ? `?${query}` : "",
+      {
+        method: "GET",
+        signal,
+      }
+    );
+
+  if (
+    !Array.isArray(
+      response.requests
+    ) ||
+    !Number.isInteger(
+      response.total
+    ) ||
+    response.total < 0 ||
+    !isRecord(
+      response.counts
+    )
+  ) {
+    throw invalidResponse(false);
+  }
+
+  return response;
+}
+
+// ============================================================
+// GET SINGLE RESCHEDULE REQUEST
+//
+// GET /api/v1/barber/rescheduling/{requestId}
+// ============================================================
+
+export async function getRescheduleById(
+  requestId: string,
+  signal?: AbortSignal
+): Promise<RescheduleRequest> {
+  const response =
+    await requestApi<RescheduleRequest>(
+      requestPath(requestId),
+      {
+        method: "GET",
+        signal,
+      }
+    );
+
+  if (
+    typeof response.id !== "string" ||
+    !response.id
+  ) {
+    throw invalidResponse(false);
+  }
+
+  return response;
+}
+
+// ============================================================
+// GET ELIGIBLE BOOKINGS
+//
+// GET /api/v1/barber/rescheduling/eligible-bookings
+//
+// The backend determines eligibility using:
+// - confirmed booking status
+// - appointment not yet started
+// - 24-hour confirmation window
+// - assigned worker and linked customer
+// - no existing pending request
+// ============================================================
+
+export async function getEligibleRescheduleBookings(
+  signal?: AbortSignal
+): Promise<EligibleBookingsResponse> {
+  const response =
+    await requestApi<EligibleBookingsResponse>(
+      "/eligible-bookings",
+      {
+        method: "GET",
+        signal,
+      }
+    );
+
+  if (
+    !Array.isArray(
+      response.bookings
+    ) ||
+    !Number.isInteger(
+      response.total
+    ) ||
+    response.total < 0 ||
+    typeof response.server_time !==
+      "string" ||
+    !Number.isFinite(
+      Date.parse(response.server_time)
+    ) ||
+    !Number.isInteger(
+      response.limit
+    ) ||
+    response.limit <= 0
+  ) {
+    throw invalidResponse(false);
+  }
+
+  const validBookings =
+    response.bookings.every(
+      (booking) =>
+        typeof booking.id ===
+          "string" &&
+        typeof booking.barber_id ===
+          "string" &&
+        typeof booking.worker_id ===
+          "string" &&
+        typeof booking.customer_id ===
+          "string" &&
+        booking.status ===
+          "confirmed" &&
+        typeof booking.confirmed_at ===
+          "string" &&
+        Number.isFinite(
+          Date.parse(
+            booking.confirmed_at
+          )
+        ) &&
+        typeof booking.reschedule_deadline ===
+          "string" &&
+        Number.isFinite(
+          Date.parse(
+            booking.reschedule_deadline
+          )
+        ) &&
+        validDate(
+          booking.booking_date
+        ) &&
+        Number.isInteger(
+          booking.service_duration_minutes
+        ) &&
+        booking.service_duration_minutes >
+          0
+    );
+
+  if (!validBookings) {
+    throw invalidResponse(false);
+  }
+
+  return response;
+}
+
+// ============================================================
+// CREATE NORMAL RESCHEDULE REQUEST
+//
+// POST /api/v1/barber/rescheduling
+//
+// Retained for compatibility with existing mobile screens.
+// ============================================================
+
+export async function createRescheduleRequest(
+  payload: CreateReschedulePayload,
+  signal?: AbortSignal
+): Promise<RescheduleActionResponse> {
+  if (
+    !payload.booking_id.trim()
+  ) {
+    throw new ReschedulingApiError(
+      "Please select a booking.",
+      0,
+      "BOOKING_REQUIRED"
+    );
+  }
+
+  validateAppointment(
+    payload.requested_date,
+    payload.requested_start_time,
+    payload.requested_end_time
+  );
+
+  const body = {
+    booking_id:
+      payload.booking_id.trim(),
+
+    requested_date:
+      payload.requested_date,
+
+    requested_start_time:
+      payload.requested_start_time,
+
+    requested_end_time:
+      payload.requested_end_time,
+
+    requested_worker_id:
+      payload.requested_worker_id ||
+      null,
+
+    reason: cleanReason(
+      payload.reason
+    ),
+  };
+
+  return requestApi<RescheduleActionResponse>(
+    "",
+    {
+      method: "POST",
+      signal,
+      body: JSON.stringify(body),
+    }
+  );
+}
+
+// ============================================================
+// CREATE WORKER UNAVAILABILITY REQUEST
+//
+// POST /api/v1/barber/rescheduling/worker-unavailability
+//
+// Three customer recovery options:
+//
+// 1. Cancel booking
+// 2. Another day with same worker
+// 3. Same day with another worker
+//
+// Options are proposals, not reserved appointments.
+// The backend performs final availability validation.
+// ============================================================
+
+export async function createWorkerUnavailabilityRequest(
+  payload: CreateWorkerUnavailabilityPayload,
+  signal?: AbortSignal
+): Promise<RescheduleActionResponse> {
+  if (
+    !payload.booking_id.trim()
+  ) {
+    throw new ReschedulingApiError(
+      "Please select a booking.",
+      0,
+      "BOOKING_REQUIRED"
+    );
+  }
+
+  const expectedTypes =
+    new Set<RecoveryOptionType>([
+      "cancel_booking",
+      "same_worker_other_day",
+      "other_worker_same_day",
+    ]);
+
+  if (
+    !Array.isArray(payload.options)
+  ) {
+    throw new ReschedulingApiError(
+      "The three recovery options are required.",
+      0,
+      "RECOVERY_OPTIONS_REQUIRED"
+    );
+  }
+
+  const suppliedTypes =
+    new Set(
+      payload.options.map(
+        (option) =>
+          option.option_type
+      )
+    );
+
+  if (
+    payload.options.length !==
+      3 ||
+    suppliedTypes.size !== 3 ||
+    [...expectedTypes].some(
+      (type) =>
+        !suppliedTypes.has(type)
+    )
+  ) {
+    throw new ReschedulingApiError(
+      "Provide cancellation, another day with the same worker, and the same day with another worker.",
+      0,
+      "INVALID_RECOVERY_OPTIONS"
+    );
+  }
+
+  const options =
+    payload.options.map(
+      (option) => {
+        // ----------------------------------------------------
+        // OPTION 1 - CANCELLATION
+        // ----------------------------------------------------
+
+        if (
+          option.option_type ===
+          "cancel_booking"
+        ) {
+          return {
+            option_type:
+              "cancel_booking" as const,
+          };
+        }
+
+        // ----------------------------------------------------
+        // OPTION 2 / 3 - APPOINTMENT ALTERNATIVES
+        // ----------------------------------------------------
+
+        if (
+          !option.worker_id.trim()
+        ) {
+          throw new ReschedulingApiError(
+            "Each appointment alternative must have a worker.",
+            0,
+            "WORKER_REQUIRED"
+          );
+        }
+
+        validateAppointment(
+          option.appointment_date,
+          option.start_time,
+          option.end_time
+        );
+
+        return {
+          option_type:
+            option.option_type,
+
+          worker_id:
+            option.worker_id.trim(),
+
+          appointment_date:
+            option.appointment_date,
+
+          start_time:
+            option.start_time,
+
+          end_time:
+            option.end_time,
+        };
+      }
+    );
+
+  const body = {
+    booking_id:
+      payload.booking_id.trim(),
+
+    reason: cleanReason(
+      payload.reason
+    ),
+
+    options,
+  };
+
+  return requestApi<RescheduleActionResponse>(
+    "/worker-unavailability",
+    {
+      method: "POST",
+      signal,
+      body: JSON.stringify(body),
+    }
+  );
+}
+
+// ============================================================
+// APPROVE RESCHEDULE REQUEST
+//
+// POST /api/v1/barber/rescheduling/{requestId}/approve
+// ============================================================
+
+export async function approveRescheduleRequest(
+  requestId: string,
+  signal?: AbortSignal
+): Promise<RescheduleActionResponse> {
+  return requestApi<RescheduleActionResponse>(
+    `${requestPath(requestId)}/approve`,
+    {
+      method: "POST",
+      signal,
+    }
+  );
+}
+
+// ============================================================
+// DECLINE RESCHEDULE REQUEST
+//
+// POST /api/v1/barber/rescheduling/{requestId}/decline
+// ============================================================
+
+export async function declineRescheduleRequest(
+  requestId: string,
+  reason?: string,
+  signal?: AbortSignal
+): Promise<RescheduleActionResponse> {
+  const body = {
+    reason:
+      cleanDecisionReason(
+        reason
+      ),
+  };
+
+  return requestApi<RescheduleActionResponse>(
+    `${requestPath(requestId)}/decline`,
+    {
+      method: "POST",
+      signal,
+      body: JSON.stringify(body),
+    }
+  );
+}
+
+// ============================================================
+// WITHDRAW RESCHEDULE REQUEST
+//
+// POST /api/v1/barber/rescheduling/{requestId}/withdraw
+// ============================================================
+
+export async function withdrawRescheduleRequest(
+  requestId: string,
+  signal?: AbortSignal
+): Promise<RescheduleActionResponse> {
+  return requestApi<RescheduleActionResponse>(
+    `${requestPath(requestId)}/withdraw`,
+    {
+      method: "POST",
+      signal,
+    }
+  );
+}
+</file>
+
+<file path="reviewsApi.ts">
+import * as SecureStore from "expo-secure-store";
+
+const BASE = String(
+  process.env.EXPO_PUBLIC_API_BASE_URL || ""
+).trim().replace(/\/+$/, "");
+
+export interface Review {
+  id: string;
+  booking_id: string;
+  customer_id: string | null;
+  customer_name: string;
+  barber_id: string;
+  service_name: string;
+  rating: number;
+  comment: string | null;
+  reply: string | null;
+  barber_replied_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ReviewStatistics {
+  total_reviews: number;
+  average_rating: number | null;
+  five_star_reviews: number;
+  five_star_percentage: number | null;
+  replied_reviews: number;
+  response_rate: number | null;
+  rating_distribution: {
+    rating: number;
+    count: number;
+    percentage: number;
+  }[];
+}
+
+export type ReviewSort = "newest" | "oldest" | "highest" | "lowest";
+
+export interface ReviewFilters {
+  search?: string;
+  rating?: number;
+  serviceName?: string;
+  sort?: ReviewSort;
+  limit?: number;
+  offset?: number;
+}
+
+export interface ReviewList {
+  reviews: Review[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export interface ReviewReplyResponse {
+  message: string;
+  review: Review;
+}
+
+async function request<T>(
+  path: string,
+  method: "GET" | "PUT" = "GET",
+  payload?: unknown,
+  signal?: AbortSignal
+): Promise<T> {
+  if (!/^https?:\/\/[^/]+/i.test(BASE)) {
+    throw new Error("EXPO_PUBLIC_API_BASE_URL is missing or invalid.");
+  }
+
+  let token: string | null;
+
+  try {
+    token = await SecureStore.getItemAsync("kshurak_barber_token");
+  } catch {
+    throw new Error("Unable to read your secure login session.");
+  }
+
+  if (!token) throw new Error("Session expired. Please log in again.");
+
+  let response: Response;
+
+  try {
+    response = await fetch(`${BASE}/api/v1/barber/reviews${path}`, {
+      method,
+      signal,
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: "application/json",
+        ...(payload === undefined ? {} : { "Content-Type": "application/json" }),
+      },
+      body: payload === undefined ? undefined : JSON.stringify(payload),
+    });
+  } catch (error) {
+    if (signal?.aborted || (error instanceof Error && error.name === "AbortError")) {
+      throw error;
+    }
+    throw new Error("Unable to connect to KSHURAK. Check the server and phone network.");
+  }
+
+  const data = await response.json().catch(() => null);
+
+  if (!response.ok) {
+    if (response.status === 401) throw new Error("Session expired. Please log in again.");
+
+    const detail = data?.detail;
+    throw new Error(
+      typeof detail === "string"
+        ? detail
+        : Array.isArray(detail)
+        ? detail.map((item: { msg?: string }) => item.msg || "Invalid value").join(", ")
+        : `Reviews request failed (${response.status}).`
+    );
+  }
+
+  if (data === null) throw new Error("Empty Reviews API response.");
+  return data as T;
+}
+
+export async function getReviews(
+  filters: ReviewFilters = {},
+  signal?: AbortSignal
+): Promise<ReviewList> {
+  const params: string[] = [];
+  const add = (key: string, value: string | number) =>
+    params.push(`${key}=${encodeURIComponent(String(value))}`);
+
+  if (filters.search?.trim()) add("search", filters.search.trim());
+  if (filters.rating !== undefined) add("rating", filters.rating);
+  if (filters.serviceName?.trim()) add("service_name", filters.serviceName.trim());
+
+  add("sort", filters.sort || "newest");
+  add("limit", Math.min(100, Math.max(1, filters.limit ?? 5)));
+  add("offset", Math.max(0, filters.offset ?? 0));
+
+  const result = await request<ReviewList>(`?${params.join("&")}`, "GET", undefined, signal);
+
+  if (!Array.isArray(result.reviews) || !Number.isFinite(result.total)) {
+    throw new Error("Invalid reviews list response.");
+  }
+  return result;
+}
+
+export async function getReviewStatistics(
+  signal?: AbortSignal
+): Promise<ReviewStatistics> {
+  const result = await request<ReviewStatistics>("/statistics", "GET", undefined, signal);
+  if (!Number.isFinite(result.total_reviews) || !Array.isArray(result.rating_distribution)) {
+    throw new Error("Invalid review statistics response.");
+  }
+  return result;
+}
+
+export function getReviewById(id: string, signal?: AbortSignal): Promise<Review> {
+  return request(`/${encodeURIComponent(id)}`, "GET", undefined, signal);
+}
+
+export function saveReviewReply(id: string, reply: string): Promise<ReviewReplyResponse> {
+  const cleaned = reply.trim();
+  if (!cleaned || cleaned.length > 3000) {
+    throw new Error("Enter a reply between 1 and 3000 characters.");
+  }
+  return request(`/${encodeURIComponent(id)}/reply`, "PUT", { reply: cleaned });
+}
+</file>
+
+<file path="servicesApi.ts">
+import * as SecureStore from "expo-secure-store";
+
+const BASE = String(
+  process.env.EXPO_PUBLIC_API_BASE_URL || ""
+).trim().replace(/\/+$/, "");
+
+const PATH = "/api/v1/barber/services";
+
+export type BarberService = {
+  id: string;
+  barber_id: string;
+  service_name: string;
+  description: string | null;
+  duration_minutes: number;
+  price: number | string;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+};
+
+export type ServicePayload = {
+  service_name: string;
+  description: string | null;
+  duration_minutes: number;
+  price: number;
+};
+
+export type ServiceListResponse = {
+  services: BarberService[];
+  total: number;
+};
+
+export type ServiceActionResponse = {
+  message: string;
+  service: BarberService;
+};
+
+export class ServicesApiError extends Error {
+  status: number;
+
+  constructor(message: string, status = 0) {
+    super(message);
+    this.name = "ServicesApiError";
+    this.status = status;
+  }
+}
+
+async function token(): Promise<string> {
+  let value: string | null;
+
+  try {
+    value = await SecureStore.getItemAsync("kshurak_barber_token");
+  } catch {
+    throw new ServicesApiError("Unable to read your secure login session.");
+  }
+
+  if (!value) {
+    throw new ServicesApiError("Session expired. Please sign in again.", 401);
+  }
+
+  return value;
+}
+
+function errorDetail(data: unknown, fallback: string): string {
+  if (!data || typeof data !== "object" || !("detail" in data)) {
+    return fallback;
+  }
+
+  const detail = (data as { detail: unknown }).detail;
+
+  if (typeof detail === "string") return detail;
+
+  if (Array.isArray(detail)) {
+    return detail.map((item: unknown) => {
+      if (item && typeof item === "object" && "msg" in item) {
+        return String((item as { msg: unknown }).msg);
+      }
+      return String(item);
+    }).join(", ");
+  }
+
+  if (detail && typeof detail === "object" && "message" in detail) {
+    return String((detail as { message: unknown }).message);
+  }
+
+  return fallback;
+}
+
+async function request<T>(
+  endpoint: string,
+  method: "GET" | "POST" | "PATCH" = "GET",
+  payload?: unknown,
+  signal?: AbortSignal
+): Promise<T> {
+  if (!/^https?:\/\/[^/]+/i.test(BASE)) {
+    throw new ServicesApiError("EXPO_PUBLIC_API_BASE_URL is missing or invalid.");
+  }
+
+  const accessToken = await token();
+  let response: Response;
+
+  try {
+    response = await fetch(`${BASE}${PATH}${endpoint}`, {
+      method,
+      signal,
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        Accept: "application/json",
+        ...(payload === undefined ? {} : { "Content-Type": "application/json" }),
+      },
+      body: payload === undefined ? undefined : JSON.stringify(payload),
+    });
+  } catch (error: unknown) {
+    if (signal?.aborted || (error instanceof Error && error.name === "AbortError")) {
+      throw error;
+    }
+
+    throw new ServicesApiError(
+      "Unable to connect to KSHURAK. Check the backend and phone network."
+    );
+  }
+
+  const data: unknown = await response.json().catch(() => null);
+
+  if (!response.ok) {
+    throw new ServicesApiError(
+      response.status === 401
+        ? "Your session has expired. Please sign in again."
+        : errorDetail(data, `Services request failed (${response.status}).`),
+      response.status
+    );
+  }
+
+  if (!data) throw new ServicesApiError("Empty Services API response.");
+  return data as T;
+}
+
+export async function getBarberServices(
+  activeOnly = false,
+  signal?: AbortSignal
+): Promise<ServiceListResponse> {
+  const result = await request<ServiceListResponse>(
+    `?active_only=${activeOnly}`, "GET", undefined, signal
+  );
+
+  if (!Array.isArray(result.services)) {
+    throw new ServicesApiError("Invalid services list response.");
+  }
+
+  return result;
+}
+
+export function createBarberService(
+  payload: ServicePayload
+): Promise<ServiceActionResponse> {
+  return request("", "POST", payload);
+}
+
+export function updateBarberService(
+  serviceId: string,
+  payload: Partial<ServicePayload> & { is_active?: boolean }
+): Promise<ServiceActionResponse> {
+  return request(`/${encodeURIComponent(serviceId)}`, "PATCH", payload);
+}
+
+export function setBarberServiceStatus(
+  serviceId: string,
+  isActive: boolean
+): Promise<ServiceActionResponse> {
+  return request(
+    `/${encodeURIComponent(serviceId)}/status?is_active=${isActive}`,
+    "PATCH"
+  );
+}
+</file>
+
+<file path="shopSetupApi.ts">
+import * as SecureStore from "expo-secure-store";
+
+const BASE_URL = String(
+  process.env.EXPO_PUBLIC_API_BASE_URL || ""
+).trim().replace(/\/+$/, "");
+
+const TOKEN_KEY = "kshurak_barber_token";
+const SHOP_PATH = "/api/v1/barber/shop-setup";
+const PROFILE_PATH = "/api/v1/barber/profile";
+const WORKERS_PATH = "/api/v1/barber/workers";
+
+export type SetupSection =
+  | "profile"
+  | "shop"
+  | "workers"
+  | "documents"
+  | "capacity";
+
+export type SubmissionStatus =
+  | "draft"
+  | "pending_review"
+  | "approved"
+  | "rejected";
+
+export interface BarberDocument {
+  path: string;
+  original_name: string | null;
+  content_type: string | null;
+  size: number | null;
+  document_type: string | null;
+}
+
+export type RegistrationDocument = BarberDocument;
+
+export interface BarberProfileResponse {
+  id: string;
+  username: string;
+  email: string;
+  years_experience: number;
+  shop_name: string | null;
+  shop_phone: string | null;
+  shop_address: string;
+  shop_image_path: string | null;
+  document_paths: BarberDocument[];
+  approval_status: string;
+  is_email_activated: boolean;
+}
+
+export interface ShopSetupWorker {
+  id: string;
+  barber_id: string;
+  full_name: string;
+  phone: string;
+  role: string;
+  years_experience: number;
+  specializations: string | null;
+  shift_start: string;
+  shift_end: string;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export type BarberWorker = ShopSetupWorker;
+
+export interface CreateWorkerPayload {
+  full_name: string;
+  phone: string;
+  role: string;
+  years_experience: number;
+  specializations: string;
+  shift_start: string;
+  shift_end: string;
+  is_active: boolean;
+}
+
+export type UpdateWorkerPayload = Partial<CreateWorkerPayload>;
+
+export interface WorkerFormValues {
+  fullName: string;
+  phone: string;
+  role: string;
+  experience: string;
+  specializations: string;
+  startTime: string;
+  endTime: string;
+  active: boolean;
+}
+
+export interface WorkerBreak {
+  id: string;
+  start: string;
+  end: string;
+}
+
+export interface WorkerSlotPayload {
+  slots: Record<string, boolean>;
+  breaks: WorkerBreak[];
+}
+
+export interface WorkerSlotResponse {
+  worker_id: string;
+  date: string;
+  shift_start: string;
+  shift_end: string;
+  slot_duration_minutes: number;
+  slots: Record<string, boolean>;
+  breaks: WorkerBreak[];
+}
+
+export const WEEK_DAYS = [
+  "Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun",
+] as const;
+
+export type WeekDay = typeof WEEK_DAYS[number];
+export type WeeklyDays = Record<WeekDay, boolean>;
+
+export interface WorkerWeeklyScheduleResponse {
+  worker_id: string;
+  weekly_days: WeeklyDays;
+}
+
+export interface ShopSetupOverview {
+  profile: BarberProfileResponse;
+  workers: ShopSetupWorker[];
+  completed: {
+    shop_profile: boolean;
+    shop_details: boolean;
+    workers: boolean;
+    documents: boolean;
+  };
+}
+
+export interface SavedShopSetup {
+  application_id: string | null;
+  setup_data: Record<string, unknown>;
+  completed_sections: SetupSection[];
+  submission_status: SubmissionStatus;
+  location_verified: boolean;
+  submitted_at: string | null;
+  published_at: string | null;
+  registration_documents: RegistrationDocument[];
+  shop_image_path: string | null;
+}
+
+export interface MobileDocument {
+  uri: string;
+  name: string;
+  mimeType: string;
+  size?: number;
+}
+
+export class ShopSetupApiError extends Error {
+  status: number;
+
+  constructor(message: string, status = 0) {
+    super(message);
+    this.name = "ShopSetupApiError";
+    this.status = status;
+  }
+}
+
+function getBaseUrl(): string {
+  if (!/^https?:\/\/[^/]+/i.test(BASE_URL)) {
+    throw new ShopSetupApiError(
+      "EXPO_PUBLIC_API_BASE_URL is missing or invalid."
+    );
+  }
+  return BASE_URL;
+}
+
+async function getToken(): Promise<string> {
+  let token: string | null;
+
+  try {
+    token = await SecureStore.getItemAsync(TOKEN_KEY);
+  } catch {
+    throw new ShopSetupApiError(
+      "Unable to access your secure login session."
+    );
+  }
+
+  if (!token) {
+    throw new ShopSetupApiError(
+      "Your session is missing. Please log in again.",
+      401
+    );
+  }
+
+  return token;
+}
+
+function errorMessage(data: unknown, fallback: string): string {
+  if (!data || typeof data !== "object") return fallback;
+
+  const result = data as {
+    detail?: unknown;
+    message?: unknown;
+  };
+
+  if (typeof result.detail === "string") return result.detail;
+
+  if (Array.isArray(result.detail)) {
+    const messages = result.detail
+      .map((item: unknown) => {
+        if (!item || typeof item !== "object") return "";
+        return String((item as { msg?: unknown }).msg || "");
+      })
+      .filter(Boolean);
+
+    if (messages.length) return messages.join("; ");
+  }
+
+  if (
+    result.detail &&
+    typeof result.detail === "object" &&
+    "message" in result.detail
+  ) {
+    return String(
+      (result.detail as { message?: unknown }).message
+    );
+  }
+
+  return typeof result.message === "string"
+    ? result.message
+    : fallback;
+}
+
+async function request<T>(
+  method: "GET" | "PUT" | "POST" | "PATCH",
+  path: string,
+  payload?: unknown,
+  signal?: AbortSignal
+): Promise<T> {
+  const base = getBaseUrl();
+  const token = await getToken();
+
+  let response: Response;
+
+  try {
+    response = await fetch(`${base}${path}`, {
+      method,
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: "application/json",
+        ...(payload === undefined
+          ? {}
+          : { "Content-Type": "application/json" }),
+      },
+      body:
+        payload === undefined
+          ? undefined
+          : JSON.stringify(payload),
+      signal,
+    });
+  } catch (error: unknown) {
+    if (
+      signal?.aborted ||
+      (error instanceof Error && error.name === "AbortError")
+    ) {
+      throw error;
+    }
+
+    throw new ShopSetupApiError(
+      "Cannot connect to the backend. Check the server and your connection."
+    );
+  }
+
+  const data: unknown = await response.json().catch(() => null);
+
+  if (!response.ok) {
+    throw new ShopSetupApiError(
+      errorMessage(data, `Request failed (${response.status}).`),
+      response.status
+    );
+  }
+
+  if (data === null || data === undefined) {
+    throw new ShopSetupApiError("Empty backend response.");
+  }
+
+  return data as T;
+}
+
+export function getShopSetup(
+  signal?: AbortSignal
+): Promise<SavedShopSetup> {
+  return request("GET", SHOP_PATH, undefined, signal);
+}
+
+export function saveShopSetup(
+  setupData: Record<string, unknown>
+): Promise<SavedShopSetup> {
+  return request("PUT", SHOP_PATH, {
+    setup_data: setupData,
+    completed_sections: [],
+  });
+}
+
+export function submitShopSetup(): Promise<SavedShopSetup> {
+  return request("POST", `${SHOP_PATH}/submit`);
+}
+
+export async function uploadShopSetupDocument(
+  file: MobileDocument,
+  documentType: string
+): Promise<{
+  message: string;
+  registration_documents: RegistrationDocument[];
+}> {
+  const base = getBaseUrl();
+  const token = await getToken();
+
+  const allowedTypes = [
+    "application/pdf",
+    "image/jpeg",
+    "image/png",
+    "image/webp",
+  ];
+
+  if (!allowedTypes.includes(file.mimeType)) {
+    throw new ShopSetupApiError(
+      "Upload a PDF, JPEG, PNG or WebP document."
+    );
+  }
+
+  if (file.size && file.size > 5 * 1024 * 1024) {
+    throw new ShopSetupApiError(
+      "Document must be 5 MB or smaller."
+    );
+  }
+
+  const form = new FormData();
+  form.append("document_type", documentType);
+  form.append(
+    "document",
+    {
+      uri: file.uri,
+      name: file.name,
+      type: file.mimeType,
+    } as unknown as Blob
+  );
+
+  let response: Response;
+
+  try {
+    response = await fetch(`${base}${SHOP_PATH}/documents`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: "application/json",
+      },
+      body: form,
+    });
+  } catch {
+    throw new ShopSetupApiError(
+      "Document upload failed. Check your connection."
+    );
+  }
+
+  const data: unknown = await response.json().catch(() => null);
+
+  if (!response.ok) {
+    throw new ShopSetupApiError(
+      errorMessage(data, "Document upload failed."),
+      response.status
+    );
+  }
+
+  if (!data) {
+    throw new ShopSetupApiError("Empty document upload response.");
+  }
+
+  return data as {
+    message: string;
+    registration_documents: RegistrationDocument[];
+  };
+}
+
+export function getShopSetupProfile(
+  signal?: AbortSignal
+): Promise<BarberProfileResponse> {
+  return request("GET", PROFILE_PATH, undefined, signal);
+}
+
+export async function getShopSetupWorkers(
+  signal?: AbortSignal
+): Promise<ShopSetupWorker[]> {
+  const workers = await request<ShopSetupWorker[]>(
+    "GET", WORKERS_PATH, undefined, signal
+  );
+
+  if (!Array.isArray(workers)) {
+    throw new ShopSetupApiError("Invalid workers response.");
+  }
+
+  return workers;
+}
+
+export function createShopSetupWorker(
+  payload: CreateWorkerPayload
+): Promise<ShopSetupWorker> {
+  return request("POST", WORKERS_PATH, payload);
+}
+
+export function updateShopSetupWorker(
+  workerId: string,
+  payload: UpdateWorkerPayload
+): Promise<ShopSetupWorker> {
+  return request(
+    "PATCH",
+    `${WORKERS_PATH}/${encodeURIComponent(workerId)}`,
+    payload
+  );
+}
+
+export function setShopSetupWorkerActive(
+  workerId: string,
+  active: boolean
+): Promise<ShopSetupWorker> {
+  return updateShopSetupWorker(workerId, { is_active: active });
+}
+
+export async function getShopSetupWorkerSlots(
+  workerId: string,
+  date: string,
+  signal?: AbortSignal
+): Promise<WorkerSlotResponse> {
+  const result = await request<WorkerSlotResponse>(
+    "GET",
+    `${WORKERS_PATH}/${encodeURIComponent(workerId)}/slots/${encodeURIComponent(date)}`,
+    undefined,
+    signal
+  );
+
+  validateSlotResponse(result, workerId, date);
+  return result;
+}
+
+export async function saveShopSetupWorkerSlots(
+  workerId: string,
+  date: string,
+  payload: WorkerSlotPayload
+): Promise<WorkerSlotResponse> {
+  const result = await request<WorkerSlotResponse>(
+    "PUT",
+    `${WORKERS_PATH}/${encodeURIComponent(workerId)}/slots/${encodeURIComponent(date)}`,
+    payload
+  );
+
+  validateSlotResponse(result, workerId, date);
+  return result;
+}
+
+function validateSlotResponse(
+  result: WorkerSlotResponse,
+  workerId: string,
+  date: string
+): void {
+  if (
+    !result ||
+    result.worker_id !== workerId ||
+    result.date !== date ||
+    !Number.isInteger(result.slot_duration_minutes) ||
+    result.slot_duration_minutes <= 0 ||
+    !result.slots ||
+    typeof result.slots !== "object" ||
+    Array.isArray(result.slots) ||
+    Object.values(result.slots).some((value) => typeof value !== "boolean") ||
+    !Array.isArray(result.breaks)
+  ) {
+    throw new ShopSetupApiError("Invalid worker slots response.");
+  }
+}
+
+function validateWeeklyResponse(
+  result: WorkerWeeklyScheduleResponse,
+  workerId: string
+): void {
+  if (
+    !result ||
+    result.worker_id !== workerId ||
+    !result.weekly_days ||
+    WEEK_DAYS.some(
+      (day) => typeof result.weekly_days[day] !== "boolean"
+    )
+  ) {
+    throw new ShopSetupApiError("Invalid weekly schedule response.");
+  }
+}
+
+export async function getShopSetupWorkerWeeklySchedule(
+  workerId: string,
+  signal?: AbortSignal
+): Promise<WorkerWeeklyScheduleResponse> {
+  const result = await request<WorkerWeeklyScheduleResponse>(
+    "GET",
+    `${WORKERS_PATH}/${encodeURIComponent(workerId)}/weekly-schedule`,
+    undefined,
+    signal
+  );
+
+  validateWeeklyResponse(result, workerId);
+  return result;
+}
+
+export async function saveShopSetupWorkerWeeklySchedule(
+  workerId: string,
+  weeklyDays: WeeklyDays
+): Promise<WorkerWeeklyScheduleResponse> {
+  if (WEEK_DAYS.some((day) => typeof weeklyDays[day] !== "boolean")) {
+    throw new ShopSetupApiError(
+      "Provide a working-day setting for all seven days."
+    );
+  }
+
+  const result = await request<WorkerWeeklyScheduleResponse>(
+    "PUT",
+    `${WORKERS_PATH}/${encodeURIComponent(workerId)}/weekly-schedule`,
+    { weekly_days: weeklyDays }
+  );
+
+  validateWeeklyResponse(result, workerId);
+  return result;
+}
+
+export function fromShopSetupWorker(
+  worker: ShopSetupWorker
+): WorkerFormValues {
+  return {
+    fullName: worker.full_name,
+    phone: worker.phone,
+    role: worker.role,
+    experience: String(worker.years_experience),
+    specializations: worker.specializations || "",
+    startTime: worker.shift_start.slice(0, 5),
+    endTime: worker.shift_end.slice(0, 5),
+    active: worker.is_active,
+  };
+}
+
+export function toShopSetupWorkerPayload(
+  worker: WorkerFormValues
+): CreateWorkerPayload {
+  return {
+    full_name: worker.fullName.trim(),
+    phone: worker.phone.trim(),
+    role: worker.role.trim() || "Barber",
+    years_experience: Number(worker.experience),
+    specializations: worker.specializations.trim(),
+    shift_start: worker.startTime,
+    shift_end: worker.endTime,
+    is_active: worker.active,
+  };
+}
+
+export async function getShopSetupOverview(
+  signal?: AbortSignal
+): Promise<ShopSetupOverview> {
+  const [profile, workers, setup] = await Promise.all([
+    getShopSetupProfile(signal),
+    getShopSetupWorkers(signal),
+    getShopSetup(signal),
+  ]);
+
+  return {
+    profile,
+    workers,
+    completed: {
+      shop_profile: setup.completed_sections.includes("profile"),
+      shop_details: setup.completed_sections.includes("shop"),
+      workers: setup.completed_sections.includes("workers"),
+      documents: setup.completed_sections.includes("documents"),
+    },
+  };
+}
+
+// Existing imports in other screens remain supported.
+export const getBarberProfile = getShopSetupProfile;
+export const getWorkers = getShopSetupWorkers;
+export const createWorker = createShopSetupWorker;
+export const updateWorker = updateShopSetupWorker;
+export const setWorkerActive = setShopSetupWorkerActive;
+export const getWorkerSlots = getShopSetupWorkerSlots;
+export const saveWorkerSlots = saveShopSetupWorkerSlots;
+export const fromBarberWorker = fromShopSetupWorker;
+export const toWorkerPayload = toShopSetupWorkerPayload;
+</file>
+
+</files>

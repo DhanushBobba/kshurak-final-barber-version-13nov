@@ -1,0 +1,9 @@
+gradle.beforeProject { project ->
+    project.pluginManager.withPlugin("com.android.application") {
+        def androidExtension = project.extensions.getByName("android")
+
+        androidExtension.defaultConfig.externalNativeBuild.cmake.arguments(
+            "-DCMAKE_OBJECT_PATH_MAX=240"
+        )
+    }
+}
